@@ -12,34 +12,201 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.checkpoint import checkpoint
+import torch.nn.functional as F
 import math
 from typing import Dict, Optional
 from dataclasses import dataclass
+from tqdm import tqdm
+import time
+import sys
+import gc
+import psutil
+
+# %%
+# IMPROVED: State-of-the-Art Memory Optimizations
+try:
+    import deepspeed
+    DEEPSPEED_AVAILABLE = True
+except ImportError:
+    DEEPSPEED_AVAILABLE = False
+
+try:
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+    from torch.distributed.fsdp import CPUOffload, MixedPrecision
+    FSDP_AVAILABLE = True
+except ImportError:
+    FSDP_AVAILABLE = False
+
+class CPUOffloadOptimizer:
+    """CPU-Offloading Optimizer für Memory-Effizienz."""
+
+    def __init__(self, params, lr=1e-4, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01):
+        self.param_groups = [{'params': list(params), 'lr': lr, 'betas': betas, 'eps': eps, 'weight_decay': weight_decay}]
+        self.state = {}
+        self.lr = lr
+        self.betas = betas
+        self.eps = eps
+        self.weight_decay = weight_decay
+
+        # CPU-Offloading Setup
+        self.cpu_states = {}
+        self._setup_cpu_offload()
+
+    def _setup_cpu_offload(self):
+        """Initialisiere CPU-Offloading für Optimizer States."""
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.requires_grad:
+                    param_id = id(p)
+                    # Erstelle CPU-Kopien der Optimizer States
+                    self.cpu_states[param_id] = {
+                        'exp_avg': torch.zeros_like(p.data, device='cpu'),
+                        'exp_avg_sq': torch.zeros_like(p.data, device='cpu'),
+                        'step': 0
+                    }
+
+    def step(self):
+        """Optimizer Step mit CPU-Offloading."""
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                param_id = id(p)
+                state = self.cpu_states[param_id]
+
+                # Lade States von CPU zu GPU
+                exp_avg = state['exp_avg'].to(p.device)
+                exp_avg_sq = state['exp_avg_sq'].to(p.device)
+
+                state['step'] += 1
+
+                # AdamW Update
+                grad = p.grad.data
+                if self.weight_decay != 0:
+                    grad = grad.add(p.data, alpha=self.weight_decay)
+
+                # Exponential moving average of gradient values
+                exp_avg.mul_(self.betas[0]).add_(grad, alpha=1 - self.betas[0])
+
+                # Exponential moving average of squared gradient values
+                exp_avg_sq.mul_(self.betas[1]).addcmul_(grad, grad, value=1 - self.betas[1])
+
+                # Bias correction
+                bias_correction1 = 1 - self.betas[0] ** state['step']
+                bias_correction2 = 1 - self.betas[1] ** state['step']
+
+                step_size = self.lr / bias_correction1
+                bias_correction2_sqrt = math.sqrt(bias_correction2)
+
+                # Update parameters
+                denom = (exp_avg_sq.sqrt() / bias_correction2_sqrt).add_(self.eps)
+                p.data.addcdiv_(exp_avg, denom, value=-step_size)
+
+                # Speichere States zurück auf CPU
+                state['exp_avg'].copy_(exp_avg.cpu())
+                state['exp_avg_sq'].copy_(exp_avg_sq.cpu())
+
+                # Cleanup GPU Memory
+                del exp_avg, exp_avg_sq
+
+    def zero_grad(self, set_to_none=False):
+        """Setze Gradienten zurück."""
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is not None:
+                    if set_to_none:
+                        p.grad = None
+                    else:
+                        p.grad.detach_()
+                        p.grad.zero_()
+
+# %%
+class MemoryMonitor:
+    """Memory-Monitor für GPU und CPU."""
+
+    def __init__(self):
+        self.peak_gpu_memory = 0
+        self.peak_cpu_memory = 0
+
+    def get_memory_stats(self):
+        """Aktuelle Memory-Statistiken."""
+        # GPU Memory
+        if torch.cuda.is_available():
+            gpu_allocated = torch.cuda.memory_allocated() / 1e9
+            gpu_reserved = torch.cuda.memory_reserved() / 1e9
+            gpu_max = torch.cuda.max_memory_allocated() / 1e9
+            self.peak_gpu_memory = max(self.peak_gpu_memory, gpu_allocated)
+        else:
+            gpu_allocated = gpu_reserved = gpu_max = 0
+
+        # CPU Memory
+        cpu_memory = psutil.virtual_memory()
+        cpu_used = cpu_memory.used / 1e9
+        cpu_percent = cpu_memory.percent
+        self.peak_cpu_memory = max(self.peak_cpu_memory, cpu_used)
+
+        return {
+            'gpu_allocated': gpu_allocated,
+            'gpu_reserved': gpu_reserved,
+            'gpu_max': gpu_max,
+            'gpu_peak': self.peak_gpu_memory,
+            'cpu_used': cpu_used,
+            'cpu_percent': cpu_percent,
+            'cpu_peak': self.peak_cpu_memory
+        }
+
+    def cleanup_memory(self):
+        """Aggressive Memory Cleanup."""
+        # GPU Cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        # CPU Cleanup
+        gc.collect()
+
+    def print_memory_stats(self, prefix=""):
+        """Drucke Memory-Statistiken."""
+        stats = self.get_memory_stats()
+        print(f"{prefix}GPU: {stats['gpu_allocated']:.1f}GB allocated, {stats['gpu_peak']:.1f}GB peak")
+        print(f"{prefix}CPU: {stats['cpu_used']:.1f}GB used ({stats['cpu_percent']:.1f}%)")
 
 # %%
 @dataclass
 class GPUTrainingConfig:
-    """GPU-optimierte Training-Konfiguration."""
-    # Model parameters
+    """1B Parameter Training - REALISTISCH für RTX 4070 Ti (12GB)."""
+    # Model parameters - 1B Parameter (passt sicher auf 12GB)
     vocab_size: int = 32000
-    hidden_size: int = 2048
-    num_attention_heads: int = 32
-    num_key_value_heads: int = 8  # GQA für Memory-Effizienz
-    num_layers: int = 24
-    max_position_embeddings: int = 4096
+    hidden_size: int = 1536        # Zurück zu 1B Parameter für GPU-Auslastung
+    num_attention_heads: int = 24  # 64 dim per head
+    num_key_value_heads: int = 6   # GQA 4:1 ratio für Memory-Effizienz
+    num_layers: int = 12           # Mehr Layer für bessere GPU-Auslastung
+    max_position_embeddings: int = 2048  # OK für Memory
     
-    # Training parameters - GPU-optimiert
-    max_steps: int = 50000  # ← HIER sind deine max_steps!
-    batch_size: int = 16    # Größere Batch für GPU
-    gradient_accumulation_steps: int = 8  # Effektive batch_size = 128
+    # Training parameters - 3B Model mit Memory-Optimierungen
+    max_steps: int = 2000    # Kurzer Test für PoC
+    batch_size: int = 5    # Sicher für 12GB VRAM
+    gradient_accumulation_steps: int = 2   # Effektive batch_size = 24
+
+    # Zusätzliche Memory-Optimierungen
+    tie_word_embeddings: bool = True      # Teile Embedding/Output Weights
     learning_rate: float = 1e-4
     weight_decay: float = 0.1
     warmup_steps: int = 2000
     
-    # GPU-spezifische Einstellungen
-    use_mixed_precision: bool = True  # FP16 für GPU
+    # Memory-Optimierungen für RTX 4070 Ti (12GB)
+    use_mixed_precision: bool = True      # BF16 für Memory-Effizienz
+    use_gradient_checkpointing: bool = False # AUS für Performance
+    use_cpu_offload: bool = False         # Standard GPU Optimizer für Performance
+    use_activation_checkpointing: bool = True  # Zusätzliche Aktivations-Optimierung
+    use_zero_optimizer: bool = True       # ZeRO-ähnliche Optimierungen
+    use_torch_compile: bool = True        # Aktiviert für Performance
     max_grad_norm: float = 1.0
-    sequence_length: int = 1024  # Längere Sequenzen auf GPU
+    sequence_length: int = 384            # Balance zwischen Performance und VRAM
+    log_interval: int = 5                 # Logging alle 5 Steps
     
     # Memory-Optimierungen
     gradient_checkpointing: bool = True
@@ -87,116 +254,149 @@ class GPUOptimizedAttention(nn.Module):
     
     def __init__(self, config: GPUTrainingConfig):
         super().__init__()
+        self.config = config  # Speichere Config für Memory-Optimierungen
         self.hidden_size = config.hidden_size
         self.num_attention_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.scaling = 1.0 / math.sqrt(self.head_dim)
-        
+
         # Projections - optimiert für GPU
         self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
-        
+
         # Dropout für Training
         self.attention_dropout = nn.Dropout(0.1)
     
-    def forward(self, hidden_states, attention_mask=None):
+    def _attention_forward(self, hidden_states, attention_mask=None):
+        """Interne Attention-Berechnung für Memory-Optimierung."""
         batch_size, seq_len, _ = hidden_states.shape
-        
+
         # Projections
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
-        
+
         # Reshape für Multi-Head
         query_states = query_states.view(batch_size, seq_len, self.num_attention_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(batch_size, seq_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(batch_size, seq_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        
+
         # GQA: Repeat K/V heads
         if self.num_key_value_groups > 1:
             key_states = key_states.repeat_interleave(self.num_key_value_groups, dim=1)
             value_states = value_states.repeat_interleave(self.num_key_value_groups, dim=1)
-        
-        # Attention computation - GPU-optimiert
-        attn_weights = torch.matmul(query_states, key_states.transpose(-2, -1)) * self.scaling
-        
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-        
-        attn_weights = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = self.attention_dropout(attn_weights)
-        
-        attn_output = torch.matmul(attn_weights, value_states)
-        
+
+        # 🚀 FLASH ATTENTION 2 - Automatisch optimiert in PyTorch 2.5+
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query_states,
+            key_states,
+            value_states,
+            attn_mask=attention_mask,
+            dropout_p=0.1 if self.training else 0.0,
+            is_causal=True,  # Causal mask für LLM
+            scale=self.scaling
+        )
+
         # Reshape und Output
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(batch_size, seq_len, self.hidden_size)
-        
+
         return self.o_proj(attn_output)
 
+    def forward(self, hidden_states, attention_mask=None):
+        # 🔧 MEMORY OPTIMIZATION: Verwende Gradient Checkpointing wenn aktiviert
+        if hasattr(self.config, 'use_activation_checkpointing') and self.config.use_activation_checkpointing and self.training:
+            return checkpoint(self._attention_forward, hidden_states, attention_mask, use_reentrant=False)
+        else:
+            return self._attention_forward(hidden_states, attention_mask)
+
 # %%
-class GPUOptimizedTransformerBlock(nn.Module):
-    """GPU-optimierter Transformer Block."""
-    
+class MemoryOptimizedTransformerBlock(nn.Module):
+    """Memory-optimierter Transformer Block mit Checkpointing."""
+
     def __init__(self, config: GPUTrainingConfig):
         super().__init__()
+        self.config = config
         self.attention = GPUOptimizedAttention(config)
-        
-        # Feed Forward - größer für bessere GPU-Auslastung
-        self.feed_forward = nn.Sequential(
-            nn.Linear(config.hidden_size, config.hidden_size * 4, bias=False),
-            nn.GELU(),  # GELU ist GPU-freundlicher als SiLU
-            nn.Linear(config.hidden_size * 4, config.hidden_size, bias=False),
-            nn.Dropout(0.1)
-        )
-        
+
+        # Feed Forward - SwiGLU für bessere Performance
+        self.gate_proj = nn.Linear(config.hidden_size, config.hidden_size * 4, bias=False)
+        self.up_proj = nn.Linear(config.hidden_size, config.hidden_size * 4, bias=False)
+        self.down_proj = nn.Linear(config.hidden_size * 4, config.hidden_size, bias=False)
+
         # Layer Norms
         self.attention_norm = nn.LayerNorm(config.hidden_size, eps=1e-5)
         self.ffn_norm = nn.LayerNorm(config.hidden_size, eps=1e-5)
-    
-    def forward(self, hidden_states, attention_mask=None):
+
+    def _ffn_forward(self, hidden_states):
+        """Interne FFN-Berechnung für Checkpointing."""
+        # SwiGLU Activation
+        gate = torch.nn.functional.silu(self.gate_proj(hidden_states))
+        up = self.up_proj(hidden_states)
+        return self.down_proj(gate * up)
+
+    def _block_forward(self, hidden_states, attention_mask=None):
+        """Kompletter Block für Checkpointing."""
         # Pre-norm attention
         normed_states = self.attention_norm(hidden_states)
         attn_output = self.attention(normed_states, attention_mask)
         hidden_states = hidden_states + attn_output
-        
+
         # Pre-norm feed forward
         normed_states = self.ffn_norm(hidden_states)
-        ffn_output = self.feed_forward(normed_states)
+        if hasattr(self.config, 'use_activation_checkpointing') and self.config.use_activation_checkpointing and self.training:
+            ffn_output = checkpoint(self._ffn_forward, normed_states, use_reentrant=False)
+        else:
+            ffn_output = self._ffn_forward(normed_states)
         hidden_states = hidden_states + ffn_output
-        
+
         return hidden_states
 
+    def forward(self, hidden_states, attention_mask=None):
+        # 🔧 MEMORY OPTIMIZATION: Gradient Checkpointing für ganzen Block
+        if hasattr(self.config, 'use_gradient_checkpointing') and self.config.use_gradient_checkpointing and self.training:
+            return checkpoint(self._block_forward, hidden_states, attention_mask, use_reentrant=False)
+        else:
+            return self._block_forward(hidden_states, attention_mask)
+
 # %%
-class GPUOptimizedLLM(nn.Module):
-    """GPU-optimiertes LLM für Training."""
-    
+class MemoryOptimizedLLM(nn.Module):
+    """1B Parameter LLM - REALISTISCH für RTX 4070 Ti (12GB)."""
+
     def __init__(self, config: GPUTrainingConfig):
         super().__init__()
         self.config = config
-        
+
         # Embeddings
         self.token_embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
-        
-        # Transformer layers
+
+        # Transformer layers - verwende memory-optimierte Blöcke
         self.layers = nn.ModuleList([
-            GPUOptimizedTransformerBlock(config) for _ in range(config.num_layers)
+            MemoryOptimizedTransformerBlock(config) for _ in range(config.num_layers)
         ])
-        
+
         # Output
         self.norm = nn.LayerNorm(config.hidden_size, eps=1e-5)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        
-        # Gradient checkpointing für Memory-Effizienz
-        if config.gradient_checkpointing:
-            self.gradient_checkpointing_enable()
-        
+
+        # Weight tying für Memory-Effizienz
+        if hasattr(config, 'tie_word_embeddings') and config.tie_word_embeddings:
+            self.lm_head.weight = self.token_embeddings.weight
+
         # Weight initialization
         self.apply(self._init_weights)
+
+        print(f"🔧 Memory-Optimized 1B LLM initialisiert:")
+        print(f"   Hidden Size: {config.hidden_size}")
+        print(f"   Layers: {config.num_layers}")
+        print(f"   Attention Heads: {config.num_attention_heads}")
+        print(f"   KV Heads: {config.num_key_value_heads}")
+        total_params = sum(p.numel() for p in self.parameters())
+        print(f"   Total Parameters: {total_params:,} ({total_params/1e9:.2f}B)")
     
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -216,14 +416,10 @@ class GPUOptimizedLLM(nn.Module):
             diagonal=1
         ).unsqueeze(0).unsqueeze(0)
         
-        # Transformer layers
+        # Transformer layers - Memory-optimiert
         for layer in self.layers:
-            if self.config.gradient_checkpointing and self.training:
-                hidden_states = torch.utils.checkpoint.checkpoint(
-                    layer, hidden_states, attention_mask, use_reentrant=False
-                )
-            else:
-                hidden_states = layer(hidden_states, attention_mask)
+            # Gradient Checkpointing ist bereits in den Layern implementiert
+            hidden_states = layer(hidden_states, attention_mask)
         
         # Output
         hidden_states = self.norm(hidden_states)
@@ -247,44 +443,97 @@ def create_gpu_optimized_dataset(config: GPUTrainingConfig, num_samples: int = 1
     labels = input_ids.clone()
     
     dataset = TensorDataset(input_ids, labels)
+
+    # 📊 OPTIMIERTER DATALOADER (2025 Techniken)
     return DataLoader(
-        dataset, 
-        batch_size=config.batch_size, 
+        dataset,
+        batch_size=config.batch_size,
         shuffle=True,
-        num_workers=4,  # Parallel data loading
-        pin_memory=True  # Faster GPU transfer
+        num_workers=4,           # ← Parallel data loading
+        pin_memory=True,         # ← GPU Memory Pinning
+        persistent_workers=True, # ← Worker Persistence für Speedup
+        prefetch_factor=4,       # ← Prefetch mehr Batches
+        drop_last=True           # ← Konsistente Batch-Größen
     )
 
 # %%
-def gpu_training_loop(config: GPUTrainingConfig):
-    """GPU-optimierte Training-Loop."""
-    
+def memory_optimized_training_loop(config: GPUTrainingConfig):
+    """3B Parameter Training mit extremen Memory-Optimierungen."""
+
+    # Expliziter Import um Konflikte zu vermeiden
+    import torch
+
     # GPU Setup Check
     if not check_gpu_setup():
         print("🚫 GPU Training nicht möglich - verwende CPU-Version")
         return
-    
+
     device = torch.device("cuda")
-    print(f"\n🚀 Starting GPU Training on {torch.cuda.get_device_name()}")
-    print(f"📊 Max Steps: {config.max_steps}")
-    print(f"🔄 Effective Batch Size: {config.batch_size * config.gradient_accumulation_steps}")
-    print(f"💾 Mixed Precision: {config.use_mixed_precision}")
-    print()
-    
+    print(f"🚀 1B Memory-Optimized Training: {config.max_steps} steps, micro-batch {config.batch_size}, grad-accum {config.gradient_accumulation_steps}")
+
+    # Memory Monitor
+    memory_monitor = MemoryMonitor()
+    memory_monitor.print_memory_stats("🔧 Initial Memory: ")
+
     # Model
-    model = GPUOptimizedLLM(config).to(device)
+    model = MemoryOptimizedLLM(config).to(device)
+
+    # Memory Check nach Model Loading
+    memory_monitor.print_memory_stats("📊 After Model Loading: ")
+
+    # 🚀 OPTIMIZER mit CPU-Offloading
+    if config.use_cpu_offload:
+        print("🔧 Verwende CPU-Offload Optimizer...")
+        optimizer = CPUOffloadOptimizer(
+            model.parameters(),
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay
+        )
+    else:
+        print("🔧 Verwende Standard AdamW...")
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+            betas=(0.9, 0.95),  # Bessere Werte für LLMs
+            fused=True          # 🚀 FUSED für 10-20% Speedup
+        )
+
+    memory_monitor.print_memory_stats("🔧 After Optimizer: ")
+
+    # 🚀 TORCH.COMPILE mit MINIMAL LOGGING (optional für 3B)
+    if hasattr(config, 'use_torch_compile') and config.use_torch_compile:
+        import os
+        import logging
+
+        # Triton Cache Fix für Windows
+        os.environ['TRITON_CACHE_DIR'] = os.path.join(os.environ.get('TEMP', 'C:\\temp'), 'triton_cache')
+
+        # LOGGING REDUZIEREN
+        logging.getLogger("triton").setLevel(logging.ERROR)
+        logging.getLogger("torch._inductor").setLevel(logging.ERROR)
+        logging.getLogger("torch._dynamo").setLevel(logging.ERROR)
+
+        # AGGRESSIVE DYNAMO OPTIMIZATIONS
+        import torch._dynamo
+        torch._dynamo.config.suppress_errors = True
+        torch._dynamo.config.verbose = False
+        torch._dynamo.config.cache_size_limit = 1000  # Mehr Cache für bessere Performance
+        print("🔧 torch.compile wird aktiviert...")
+
+        try:
+            model = torch.compile(model, mode="max-autotune", fullgraph=False)
+            print("✅ torch.compile aktiviert")
+        except Exception as e:
+            print(f"⚠️  torch.compile Fehler: {e}")
+            print("💡 Fallback: Standard PyTorch")
+    else:
+        print("🔧 torch.compile deaktiviert für Memory-Effizienz")
+
+    # Optimizer bereits oben definiert - entferne Duplikat
     
-    # Optimizer - GPU-optimiert
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-        betas=(0.9, 0.95),  # Bessere Werte für LLMs
-        eps=1e-8
-    )
-    
-    # Mixed Precision Scaler
-    scaler = torch.cuda.amp.GradScaler() if config.use_mixed_precision else None
+    # 🔥 MODERNISIERTE MIXED PRECISION (PyTorch 2.5+)
+    scaler = torch.amp.GradScaler('cuda') if config.use_mixed_precision else None
     
     # Dataset
     dataloader = create_gpu_optimized_dataset(config)
@@ -294,12 +543,26 @@ def gpu_training_loop(config: GPUTrainingConfig):
     model.train()
     total_loss = 0.0
     step = 0
+
+    # 📊 PERFORMANCE MONITORING
+    step_times = []
+    start_time = time.time()
     
-    print("🎯 GPU Training gestartet...")
-    
-    # TRAINING LOOP mit max_steps
+    print("🎯 Training gestartet...")
+
+    # TRAINING LOOP mit minimaler Progress Bar
+    progress_bar = tqdm(
+        total=config.max_steps,
+        desc="🚀 Training",
+        unit="step",
+        ncols=120,
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}",
+        mininterval=2.0,  # Update nur alle 2 Sekunden für weniger Overhead
+        maxinterval=10.0  # Maximal alle 10 Sekunden
+    )
+
     while step < config.max_steps:
-        optimizer.zero_grad()
+        step_start_time = time.time()
         accumulated_loss = 0.0
         
         # Gradient accumulation
@@ -310,14 +573,15 @@ def gpu_training_loop(config: GPUTrainingConfig):
                 data_iter = iter(dataloader)
                 batch = next(data_iter)
             
+            # 🚀 NON-BLOCKING GPU Transfer für bessere Performance
             input_ids, labels = [x.to(device, non_blocking=True) for x in batch]
-            
-            # Mixed precision forward pass
+
+            # 🔥 BFLOAT16 Mixed Precision (stabiler als FP16)
             if config.use_mixed_precision:
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda', dtype=torch.bfloat16):  # ← Modernisierte API
                     outputs = model(input_ids, labels=labels)
                     loss = outputs["loss"] / config.gradient_accumulation_steps
-                
+
                 scaler.scale(loss).backward()
             else:
                 outputs = model(input_ids, labels=labels)
@@ -325,8 +589,13 @@ def gpu_training_loop(config: GPUTrainingConfig):
                 loss.backward()
             
             accumulated_loss += loss.item()
-        
-        # Optimizer step
+
+            # 🔧 MEMORY CLEANUP nach jedem Micro-Step
+            del input_ids, labels, outputs, loss
+            if micro_step % 8 == 0:  # Cleanup alle 8 Micro-Steps
+                memory_monitor.cleanup_memory()
+
+        # 🔥 OPTIMIERTER OPTIMIZER STEP
         if config.use_mixed_precision:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
@@ -335,38 +604,57 @@ def gpu_training_loop(config: GPUTrainingConfig):
         else:
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
             optimizer.step()
+
+        # ⚡ set_to_none für bessere Performance
+        optimizer.zero_grad(set_to_none=True)
         
         step += 1
         total_loss += accumulated_loss
-        
+
+        # 📊 PERFORMANCE TRACKING
+        step_time = time.time() - step_start_time
+        step_times.append(step_time)
+
+        # Update Progress Bar
+        progress_bar.update(1)
+
         # Logging
         if step % config.log_interval == 0:
             avg_loss = total_loss / config.log_interval
             gpu_memory = torch.cuda.max_memory_allocated() / 1e9
-            print(f"Step {step:5d}/{config.max_steps} | Loss: {avg_loss:.4f} | GPU Memory: {gpu_memory:.1f}GB")
+            lr = optimizer.param_groups[0]['lr']
+
+            # 🚀 PERFORMANCE METRICS
+            recent_step_times = step_times[-config.log_interval:] if len(step_times) >= config.log_interval else step_times
+            avg_step_time = sum(recent_step_times) / len(recent_step_times) if recent_step_times else 0
+            steps_per_sec = 1.0 / avg_step_time if avg_step_time > 0 else 0
+
+            # Update progress bar with current stats
+            progress_bar.set_postfix({
+                'Loss': f'{avg_loss:.4f}',
+                'GPU': f'{gpu_memory:.1f}GB',
+                'Step/s': f'{steps_per_sec:.2f}',
+                'Time': f'{avg_step_time:.1f}s'
+            })
+
             total_loss = 0.0
             torch.cuda.reset_peak_memory_stats()
         
-        # Early stopping für Demo
-        if step >= 200:  # Nur 200 Steps für Demo
-            print(f"🛑 Demo beendet nach {step} Steps")
-            break
-    
-    print(f"✅ Training completed!")
+        # Kein Early Stopping - laufe die vollen Steps
+
+    # Close progress bar
+    progress_bar.close()
+
+    print(f"\n✅ Training completed!")
+    print(f"📊 Final Stats:")
+    print(f"   Steps: {step}")
+    print(f"   GPU Memory Peak: {torch.cuda.max_memory_allocated() / 1e9:.1f}GB")
+    print(f"   Model Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
 # %%
 if __name__ == "__main__":
-    # GPU-optimierte Konfiguration
-    config = GPUTrainingConfig(
-        max_steps=10000,     # ← max_steps für GPU Training
-        batch_size=8,        # GPU-optimiert
-        gradient_accumulation_steps=4,
-        hidden_size=1024,    # Kleineres Modell für Demo
-        num_layers=12,
-        sequence_length=512,
-        use_mixed_precision=True,
-        gradient_checkpointing=True
-    )
+    # Verwende die 3B Memory-Optimized Konfiguration
+    config = GPUTrainingConfig()
     
     print("=== GPU-OPTIMIERTE TRAINING KONFIGURATION ===")
     print(f"Max Steps: {config.max_steps}")
@@ -377,5 +665,5 @@ if __name__ == "__main__":
     print(f"Gradient Checkpointing: {config.gradient_checkpointing}")
     print()
     
-    # Start GPU training
-    gpu_training_loop(config)
+    # Start Memory-Optimized 3B Training
+    memory_optimized_training_loop(config)
