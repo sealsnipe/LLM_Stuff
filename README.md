@@ -308,45 +308,98 @@ python text_generator.py
 
 #### **RTX 3060 (12GB) - Budget Setup**
 ```python
-# gpu_training_optimized.py anpassen:
-batch_size: int = 3
-hidden_size: int = 1024
-num_layers: int = 10
-sequence_length: int = 256
+# config.py anpassen:
+model_config.hidden_size = 1024
+model_config.num_layers = 10
+training_config.batch_size = 3
+training_config.sequence_length = 256
+training_config.use_activation_checkpointing = True
 
 # Erwartete Performance:
-# - ~500M Parameter Model
+# - ~160M Parameter Model
 # - ~1.5-2.0 Steps/sec
 # - VRAM: 8-10GB
 ```
 
-#### **RTX 4070 Ti (12GB) - Empfohlen (Standard)**
+#### **RTX 4070 Ti (12GB) - Standard (Aktuell)**
 ```python
 # Aktuelle Konfiguration (optimal):
-batch_size: int = 5
-hidden_size: int = 1536
-num_layers: int = 12
-sequence_length: int = 384
+model_config.hidden_size = 1536
+model_config.num_layers = 12
+training_config.batch_size = 5
+training_config.sequence_length = 384
 
 # Erwartete Performance:
-# - ~730M Parameter Model
+# - ~460M Parameter Model
 # - ~1.2-1.5 Steps/sec
 # - VRAM: 10-12GB
 ```
 
 #### **RTX 4080/4090 (16-24GB) - High-End**
 ```python
-# Für größere Modelle:
-batch_size: int = 8
-hidden_size: int = 2048
-num_layers: int = 20
-sequence_length: int = 512
+# config.py für größere Modelle:
+model_config.hidden_size = 2048
+model_config.num_layers = 20
+training_config.batch_size = 8
+training_config.sequence_length = 512
 
 # Erwartete Performance:
-# - ~1.5B Parameter Model
+# - ~1.1B Parameter Model
 # - ~0.8-1.2 Steps/sec
-# - VRAM: 14-20GB
+# - VRAM: 16-20GB
 ```
+
+### 🎯 **Schnelle Konfiguration:**
+```python
+# Für schnelle Tests:
+training_config.max_steps = 100
+training_config.log_interval = 5
+
+# Für Production:
+training_config.max_steps = 10000
+training_config.save_interval = 1000
+```
+
+### 📋 **Config-Struktur im Detail:**
+
+#### **ModelConfig** - Architektur-Parameter
+```python
+vocab_size: int = 32000              # Vocabulary-Größe
+hidden_size: int = 1536              # Model-Dimension
+num_layers: int = 12                 # Transformer-Layer
+num_attention_heads: int = 24        # Query-Heads
+num_key_value_heads: int = 6         # KV-Heads (GQA)
+intermediate_size: int = 4096        # FFN-Dimension
+use_gqa: bool = True                 # Grouped-Query Attention
+use_rope: bool = True                # Rotary Position Embeddings
+use_swiglu: bool = True              # SwiGLU Activation
+```
+
+#### **TrainingConfig** - Training-Parameter
+```python
+max_steps: int = 2000                # Training-Schritte
+batch_size: int = 5                  # Micro-Batch-Größe
+gradient_accumulation_steps: int = 8 # Gradient-Akkumulation
+sequence_length: int = 384           # Sequenz-Länge
+learning_rate: float = 5e-4          # Lernrate
+use_torch_compile: bool = True       # torch.compile aktivieren
+use_mixed_precision: bool = True     # Mixed Precision (BF16)
+optimizer_type: str = "adamw_fused"  # Optimizer-Typ
+```
+
+#### **InferenceConfig** - Generation-Parameter
+```python
+temperature: float = 0.8             # Sampling-Temperature
+top_p: float = 0.9                   # Nucleus-Sampling
+top_k: int = 50                      # Top-k Sampling
+max_length: int = 100                # Max. Generation-Länge
+do_sample: bool = True               # Sampling vs. Greedy
+```
+
+### 🔄 **Config-Änderungen anwenden:**
+1. **Editiere `config.py`** - Ändere die gewünschten Werte
+2. **Starte Training** - `python gpu_training_optimized.py`
+3. **Alle Komponenten** verwenden automatisch die neuen Werte
 
 #### **Multi-GPU Setup (Fortgeschritten)**
 ```python
@@ -368,7 +421,45 @@ Das System bietet Real-time Monitoring:
 - **GPU%**: GPU Utilization (Ziel: 60-80%)
 - **Step/s**: Training Speed
 
-## 🔧 Konfiguration & Tuning
+## ⚙️ Zentrale Konfiguration
+
+### 📁 `config.py` - Alle Parameter an einem Ort
+
+Das System verwendet eine **zentrale Konfigurationsdatei** für alle Parameter. Keine komplexen Presets - einfach die Werte direkt ändern:
+
+```python
+# config.py - Einfach editieren für deine Hardware
+
+# === MODEL ARCHITECTURE ===
+model_config = ModelConfig(
+    vocab_size=32000,
+    hidden_size=1536,        # Für RTX 4070 Ti optimiert
+    num_layers=12,
+    num_attention_heads=24,
+    num_key_value_heads=6,   # GQA 4:1 ratio
+    # ... weitere Parameter
+)
+
+# === TRAINING CONFIGURATION ===
+training_config = TrainingConfig(
+    max_steps=2000,
+    batch_size=5,            # Für 12GB VRAM optimiert
+    gradient_accumulation_steps=8,  # Effective batch: 40
+    sequence_length=384,
+    learning_rate=5e-4,
+    # ... weitere Parameter
+)
+
+# === INFERENCE CONFIGURATION ===
+inference_config = InferenceConfig(
+    temperature=0.8,
+    top_p=0.9,
+    max_length=100,
+    # ... weitere Parameter
+)
+```
+
+### 🔧 Konfiguration & Tuning
 
 ### Für verschiedene GPUs anpassen:
 

@@ -23,6 +23,40 @@ import sys
 import gc
 import psutil
 
+# Import centralized configuration
+from config import model_config, training_config, hardware_config, system_config
+
+# Temporary compatibility - create a config object with all settings
+class CompatConfig:
+    def __init__(self):
+        # Model settings
+        self.vocab_size = model_config.vocab_size
+        self.hidden_size = model_config.hidden_size
+        self.num_layers = model_config.num_layers
+        self.num_attention_heads = model_config.num_attention_heads
+        self.num_key_value_heads = model_config.num_key_value_heads
+        self.tie_word_embeddings = model_config.tie_word_embeddings
+
+        # Training settings
+        self.max_steps = training_config.max_steps
+        self.batch_size = training_config.batch_size
+        self.gradient_accumulation_steps = training_config.gradient_accumulation_steps
+        self.sequence_length = training_config.sequence_length
+        self.learning_rate = training_config.learning_rate
+        self.weight_decay = training_config.weight_decay
+        self.max_grad_norm = training_config.max_grad_norm
+        self.use_torch_compile = training_config.use_torch_compile
+        self.use_mixed_precision = training_config.use_mixed_precision
+        self.use_activation_checkpointing = training_config.use_activation_checkpointing
+        self.use_gradient_checkpointing = training_config.use_activation_checkpointing
+        self.log_interval = training_config.log_interval
+        self.adam_beta1 = training_config.adam_beta1
+        self.adam_beta2 = training_config.adam_beta2
+        self.adam_eps = training_config.adam_eps
+
+# Create global config instance for backward compatibility
+config = CompatConfig()
+
 # %%
 # IMPROVED: State-of-the-Art Memory Optimizations
 try:
@@ -175,47 +209,8 @@ class MemoryMonitor:
         print(f"{prefix}CPU: {stats['cpu_used']:.1f}GB used ({stats['cpu_percent']:.1f}%)")
 
 # %%
-@dataclass
-class GPUTrainingConfig:
-    """1B Parameter Training - REALISTISCH für RTX 4070 Ti (12GB)."""
-    # Model parameters - 1B Parameter (passt sicher auf 12GB)
-    vocab_size: int = 32000
-    hidden_size: int = 1536        # Zurück zu 1B Parameter für GPU-Auslastung
-    num_attention_heads: int = 24  # 64 dim per head
-    num_key_value_heads: int = 6   # GQA 4:1 ratio für Memory-Effizienz
-    num_layers: int = 12           # Mehr Layer für bessere GPU-Auslastung
-    max_position_embeddings: int = 2048  # OK für Memory
-    
-    # Training parameters - 3B Model mit Memory-Optimierungen
-    max_steps: int = 2000    # Kurzer Test für PoC
-    batch_size: int = 5    # Sicher für 12GB VRAM
-    gradient_accumulation_steps: int = 2   # Effektive batch_size = 24
-
-    # Zusätzliche Memory-Optimierungen
-    tie_word_embeddings: bool = True      # Teile Embedding/Output Weights
-    learning_rate: float = 1e-4
-    weight_decay: float = 0.1
-    warmup_steps: int = 2000
-    
-    # Memory-Optimierungen für RTX 4070 Ti (12GB)
-    use_mixed_precision: bool = True      # BF16 für Memory-Effizienz
-    use_gradient_checkpointing: bool = False # AUS für Performance
-    use_cpu_offload: bool = False         # Standard GPU Optimizer für Performance
-    use_activation_checkpointing: bool = True  # Zusätzliche Aktivations-Optimierung
-    use_zero_optimizer: bool = True       # ZeRO-ähnliche Optimierungen
-    use_torch_compile: bool = True        # Aktiviert für Performance
-    max_grad_norm: float = 1.0
-    sequence_length: int = 384            # Balance zwischen Performance und VRAM
-    log_interval: int = 5                 # Logging alle 5 Steps
-    
-    # Memory-Optimierungen
-    gradient_checkpointing: bool = True
-    use_flash_attention: bool = True
-    
-    # Logging
-    log_interval: int = 100
-    eval_interval: int = 1000
-    save_interval: int = 5000
+# Configuration wird aus config.py geladen
+# Alle Parameter können direkt in config.py angepasst werden
 
 def check_gpu_setup():
     """Überprüft GPU-Setup und gibt Empfehlungen."""
@@ -252,21 +247,20 @@ def check_gpu_setup():
 class GPUOptimizedAttention(nn.Module):
     """GPU-optimierte Attention mit Memory-Effizienz."""
     
-    def __init__(self, config: GPUTrainingConfig):
+    def __init__(self):
         super().__init__()
-        self.config = config  # Speichere Config für Memory-Optimierungen
-        self.hidden_size = config.hidden_size
-        self.num_attention_heads = config.num_attention_heads
-        self.num_key_value_heads = config.num_key_value_heads
-        self.head_dim = config.hidden_size // config.num_attention_heads
-        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.hidden_size = model_config.hidden_size
+        self.num_attention_heads = model_config.num_attention_heads
+        self.num_key_value_heads = model_config.num_key_value_heads
+        self.head_dim = model_config.hidden_size // model_config.num_attention_heads
+        self.num_key_value_groups = model_config.num_attention_heads // model_config.num_key_value_heads
         self.scaling = 1.0 / math.sqrt(self.head_dim)
 
         # Projections - optimiert für GPU
-        self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=False)
-        self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
+        self.q_proj = nn.Linear(model_config.hidden_size, model_config.num_attention_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(model_config.hidden_size, model_config.num_key_value_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(model_config.hidden_size, model_config.num_key_value_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(model_config.num_attention_heads * self.head_dim, model_config.hidden_size, bias=False)
 
         # Dropout für Training
         self.attention_dropout = nn.Dropout(0.1)
@@ -309,7 +303,7 @@ class GPUOptimizedAttention(nn.Module):
 
     def forward(self, hidden_states, attention_mask=None):
         # 🔧 MEMORY OPTIMIZATION: Verwende Gradient Checkpointing wenn aktiviert
-        if hasattr(self.config, 'use_activation_checkpointing') and self.config.use_activation_checkpointing and self.training:
+        if training_config.use_activation_checkpointing and self.training:
             return checkpoint(self._attention_forward, hidden_states, attention_mask, use_reentrant=False)
         else:
             return self._attention_forward(hidden_states, attention_mask)
@@ -318,10 +312,9 @@ class GPUOptimizedAttention(nn.Module):
 class MemoryOptimizedTransformerBlock(nn.Module):
     """Memory-optimierter Transformer Block mit Checkpointing."""
 
-    def __init__(self, config: GPUTrainingConfig):
+    def __init__(self):
         super().__init__()
-        self.config = config
-        self.attention = GPUOptimizedAttention(config)
+        self.attention = GPUOptimizedAttention()
 
         # Feed Forward - SwiGLU für bessere Performance
         self.gate_proj = nn.Linear(config.hidden_size, config.hidden_size * 4, bias=False)
@@ -348,7 +341,7 @@ class MemoryOptimizedTransformerBlock(nn.Module):
 
         # Pre-norm feed forward
         normed_states = self.ffn_norm(hidden_states)
-        if hasattr(self.config, 'use_activation_checkpointing') and self.config.use_activation_checkpointing and self.training:
+        if training_config.use_activation_checkpointing and self.training:
             ffn_output = checkpoint(self._ffn_forward, normed_states, use_reentrant=False)
         else:
             ffn_output = self._ffn_forward(normed_states)
@@ -358,7 +351,7 @@ class MemoryOptimizedTransformerBlock(nn.Module):
 
     def forward(self, hidden_states, attention_mask=None):
         # 🔧 MEMORY OPTIMIZATION: Gradient Checkpointing für ganzen Block
-        if hasattr(self.config, 'use_gradient_checkpointing') and self.config.use_gradient_checkpointing and self.training:
+        if training_config.use_activation_checkpointing and self.training:
             return checkpoint(self._block_forward, hidden_states, attention_mask, use_reentrant=False)
         else:
             return self._block_forward(hidden_states, attention_mask)
@@ -367,16 +360,15 @@ class MemoryOptimizedTransformerBlock(nn.Module):
 class MemoryOptimizedLLM(nn.Module):
     """1B Parameter LLM - REALISTISCH für RTX 4070 Ti (12GB)."""
 
-    def __init__(self, config: GPUTrainingConfig):
+    def __init__(self):
         super().__init__()
-        self.config = config
 
         # Embeddings
-        self.token_embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.token_embeddings = nn.Embedding(model_config.vocab_size, model_config.hidden_size)
 
         # Transformer layers - verwende memory-optimierte Blöcke
         self.layers = nn.ModuleList([
-            MemoryOptimizedTransformerBlock(config) for _ in range(config.num_layers)
+            MemoryOptimizedTransformerBlock() for _ in range(config.num_layers)
         ])
 
         # Output
@@ -431,12 +423,12 @@ class MemoryOptimizedLLM(nn.Module):
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
             loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
+            loss = loss_fct(shift_logits.view(-1, config.vocab_size), shift_labels.view(-1))
         
         return {"loss": loss, "logits": logits}
 
 # %%
-def create_gpu_optimized_dataset(config: GPUTrainingConfig, num_samples: int = 10000):
+def create_gpu_optimized_dataset(num_samples: int = 10000):
     """Erstellt GPU-optimierten Datensatz."""
     # Größere Sequenzen für GPU
     input_ids = torch.randint(0, config.vocab_size, (num_samples, config.sequence_length))
@@ -457,7 +449,7 @@ def create_gpu_optimized_dataset(config: GPUTrainingConfig, num_samples: int = 1
     )
 
 # %%
-def memory_optimized_training_loop(config: GPUTrainingConfig):
+def memory_optimized_training_loop():
     """3B Parameter Training mit extremen Memory-Optimierungen."""
 
     # Expliziter Import um Konflikte zu vermeiden
@@ -469,40 +461,33 @@ def memory_optimized_training_loop(config: GPUTrainingConfig):
         return
 
     device = torch.device("cuda")
-    print(f"🚀 1B Memory-Optimized Training: {config.max_steps} steps, micro-batch {config.batch_size}, grad-accum {config.gradient_accumulation_steps}")
+    print(f"🚀 Memory-Optimized Training: {training_config.max_steps} steps, micro-batch {training_config.batch_size}, grad-accum {training_config.gradient_accumulation_steps}")
 
     # Memory Monitor
     memory_monitor = MemoryMonitor()
     memory_monitor.print_memory_stats("🔧 Initial Memory: ")
 
     # Model
-    model = MemoryOptimizedLLM(config).to(device)
+    model = MemoryOptimizedLLM().to(device)
 
     # Memory Check nach Model Loading
     memory_monitor.print_memory_stats("📊 After Model Loading: ")
 
-    # 🚀 OPTIMIZER mit CPU-Offloading
-    if config.use_cpu_offload:
-        print("🔧 Verwende CPU-Offload Optimizer...")
-        optimizer = CPUOffloadOptimizer(
-            model.parameters(),
-            lr=config.learning_rate,
-            weight_decay=config.weight_decay
-        )
-    else:
-        print("🔧 Verwende Standard AdamW...")
-        optimizer = optim.AdamW(
-            model.parameters(),
-            lr=config.learning_rate,
-            weight_decay=config.weight_decay,
-            betas=(0.9, 0.95),  # Bessere Werte für LLMs
-            fused=True          # 🚀 FUSED für 10-20% Speedup
-        )
+    # 🚀 OPTIMIZER - Verwende immer AdamW Fused
+    print("🔧 Verwende Fused AdamW...")
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=training_config.learning_rate,
+        weight_decay=training_config.weight_decay,
+        betas=(training_config.adam_beta1, training_config.adam_beta2),
+        eps=training_config.adam_eps,
+        fused=True  # 🚀 FUSED für 10-20% Speedup
+    )
 
     memory_monitor.print_memory_stats("🔧 After Optimizer: ")
 
-    # 🚀 TORCH.COMPILE mit MINIMAL LOGGING (optional für 3B)
-    if hasattr(config, 'use_torch_compile') and config.use_torch_compile:
+    # 🚀 TORCH.COMPILE mit MINIMAL LOGGING
+    if training_config.use_torch_compile:
         import os
         import logging
 
@@ -536,7 +521,7 @@ def memory_optimized_training_loop(config: GPUTrainingConfig):
     scaler = torch.amp.GradScaler('cuda') if config.use_mixed_precision else None
     
     # Dataset
-    dataloader = create_gpu_optimized_dataset(config)
+    dataloader = create_gpu_optimized_dataset()
     data_iter = iter(dataloader)
     
     # Training state
@@ -653,17 +638,11 @@ def memory_optimized_training_loop(config: GPUTrainingConfig):
 
 # %%
 if __name__ == "__main__":
-    # Verwende die 3B Memory-Optimized Konfiguration
-    config = GPUTrainingConfig()
-    
     print("=== GPU-OPTIMIERTE TRAINING KONFIGURATION ===")
-    print(f"Max Steps: {config.max_steps}")
-    print(f"Batch Size: {config.batch_size}")
-    print(f"Gradient Accumulation: {config.gradient_accumulation_steps}")
-    print(f"Effective Batch Size: {config.batch_size * config.gradient_accumulation_steps}")
-    print(f"Mixed Precision: {config.use_mixed_precision}")
-    print(f"Gradient Checkpointing: {config.gradient_checkpointing}")
+    print(f"📊 Model: {model_config.hidden_size}d, {model_config.num_layers} layers")
+    print(f"🚀 Training: {training_config.max_steps} steps, batch {training_config.batch_size}")
+    print(f"⚡ Optimizations: torch.compile={training_config.use_torch_compile}, mixed_precision={training_config.use_mixed_precision}")
     print()
-    
-    # Start Memory-Optimized 3B Training
-    memory_optimized_training_loop(config)
+
+    # Start Training
+    memory_optimized_training_loop()

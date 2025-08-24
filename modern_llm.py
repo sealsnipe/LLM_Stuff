@@ -15,42 +15,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
-from dataclasses import dataclass
-
-# %%
-@dataclass
-class ModelConfig:
-    """Modern LLM Configuration with all optimizations."""
-    # Model architecture
-    vocab_size: int = 49152
-    d_model: int = 384
-    n_layers: int = 6
-    n_heads: int = 8
-    n_kv_heads: int = 2  # GQA: fewer KV heads than Q heads
-    d_ff: int = 1536
-    max_seq_len: int = 512
-    
-    # Training parameters
-    max_steps: int = 2000
-    batch_size: int = 24
-    learning_rate: float = 5e-3
-    muon_lr: float = 0.01
-    weight_decay: float = 0.1
-    
-    # Regularization
-    dropout: float = 0.1
-    rms_norm_eps: float = 1e-6
-    
-    # Optimization
-    use_amp: bool = True  # Automatic Mixed Precision
-    gradient_clip: float = 1.0
-    
-    # Evaluation
-    eval_steps: int = 100
-    eval_interval: int = 500
-    
-    # Data
-    max_tokens: int = 500_000
+# Import centralized configuration
+from config import model_config
     
     def __post_init__(self):
         """Validate configuration."""

@@ -20,6 +20,9 @@ import os
 from tqdm import tqdm
 warnings.filterwarnings('ignore')
 
+# Import centralized configuration
+from config import inference_config, hardware_config
+
 # %%
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility."""
