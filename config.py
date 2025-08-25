@@ -15,7 +15,7 @@ class ModelConfig:
     """Model Architecture Configuration."""
 
     # Basic Architecture
-    vocab_size: int = 32000
+    vocab_size: int = 49152  # SmolLM-135M Tokenizer Vocabulary
     hidden_size: int = 1536
     num_layers: int = 12
     num_attention_heads: int = 24
@@ -129,6 +129,68 @@ class HardwareConfig:
     world_size: int = 1
     local_rank: int = 0
 
+# === DATASET CONFIGURATION ===
+@dataclass
+class DatasetConfig:
+    """Dataset Configuration."""
+
+    # Default Dataset Settings
+    default_tokenizer: str = "HuggingFaceTB/SmolLM-135M"
+    default_dataset: str = "fineweb-edu"  # "fineweb-edu", "custom"
+
+    # FineWeb-Edu Settings
+    fineweb_cache_dir: str = "cache/fineweb"
+    fineweb_streaming: bool = True
+    fineweb_num_samples: int = 10000  # Default sample size
+
+    # Dataset Size Presets
+    dataset_sizes: dict = None
+
+    def __post_init__(self):
+        if self.dataset_sizes is None:
+            self.dataset_sizes = {
+                "tiny": {
+                    "num_samples": 1000,
+                    "description": "Tiny sample for quick testing",
+                    "estimated_tokens": "~200K tokens",
+                    "training_time": "~5 minutes"
+                },
+                "small": {
+                    "num_samples": 10000,
+                    "description": "Small sample for development",
+                    "estimated_tokens": "~2M tokens",
+                    "training_time": "~30 minutes"
+                },
+                "medium": {
+                    "num_samples": 100000,
+                    "description": "Medium sample (FineWeb-Edu sample-10BT)",
+                    "estimated_tokens": "~20M tokens",
+                    "training_time": "~5 hours",
+                    "dataset_size": "~27GB"
+                },
+                "large": {
+                    "num_samples": 1000000,
+                    "description": "Large sample (FineWeb-Edu sample-100BT)",
+                    "estimated_tokens": "~200M tokens",
+                    "training_time": "~2 days",
+                    "dataset_size": "~277GB"
+                },
+                "production": {
+                    "num_samples": 10000000,
+                    "description": "Production training (FineWeb-Edu sample-350BT)",
+                    "estimated_tokens": "~2B tokens",
+                    "training_time": "~1-2 weeks",
+                    "dataset_size": "~388GB"
+                },
+                "full": {
+                    "num_samples": None,
+                    "description": "Full FineWeb-Edu dataset",
+                    "estimated_tokens": "~1.3T tokens",
+                    "training_time": "~months",
+                    "dataset_size": "~10.4TB"
+                }
+            }
+
 # === SYSTEM CONFIGURATION ===
 @dataclass
 class SystemConfig:
@@ -158,3 +220,4 @@ training_config = TrainingConfig()
 inference_config = InferenceConfig()
 hardware_config = HardwareConfig()
 system_config = SystemConfig()
+dataset_config = DatasetConfig()
