@@ -172,7 +172,7 @@ def setup_hybrid_optimizer(model: nn.Module, config) -> List[Optimizer]:
             momentum=0.95
         )
         optimizers.append(muon_optimizer)
-        print(f"  🚀 Muon parameters: {sum(p.numel() for p in muon_params):,}")
+        # Silent parameter counting
     
     if adamw_params:
         adamw_optimizer = torch.optim.AdamW(
@@ -181,7 +181,7 @@ def setup_hybrid_optimizer(model: nn.Module, config) -> List[Optimizer]:
             weight_decay=config.weight_decay
         )
         optimizers.append(adamw_optimizer)
-        print(f"  ⚙️  AdamW parameters: {sum(p.numel() for p in adamw_params):,}")
+        # Silent parameter counting
     
     return optimizers
 
@@ -219,10 +219,10 @@ class OptimizerManager:
         self.schedulers = [create_lr_scheduler(opt, config) for opt in self.optimizers]
         self.step_count = 0
     
-    def zero_grad(self):
+    def zero_grad(self, set_to_none: bool = False):
         """Zero gradients for all optimizers."""
         for optimizer in self.optimizers:
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=set_to_none)
     
     def step(self):
         """Step all optimizers and schedulers."""
@@ -234,6 +234,15 @@ class OptimizerManager:
         
         self.step_count += 1
     
+    @property
+    def param_groups(self):
+        """Compatibility property for mixed precision scaler."""
+        # Kombiniere alle param_groups von allen Optimizern
+        all_groups = []
+        for optimizer in self.optimizers:
+            all_groups.extend(optimizer.param_groups)
+        return all_groups
+
     def get_lr(self) -> float:
         """Get current learning rate (from first optimizer)."""
         if self.optimizers:

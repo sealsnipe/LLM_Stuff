@@ -14,9 +14,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import platform
 from typing import Optional, Tuple
 # Import centralized configuration
-from config import model_config
+from config import model_config, training_config
+
+# Platform-specific CUDAGraphs fix detection
+# Linux + torch.compile requires tensor cloning to prevent memory overwriting
+# Windows does not need this fix
+_NEEDS_TENSOR_CLONING = platform.system() == "Linux" and training_config.use_torch_compile
+
+if _NEEDS_TENSOR_CLONING:
+    print("🐧 Linux torch.compile detected - Tensor cloning AKTIVIERT")
+else:
+    print(f"🔧 Platform: {platform.system()} - Tensor cloning DEAKTIVIERT")
     
     def __post_init__(self):
         """Validate configuration."""
@@ -63,9 +74,13 @@ class Rotary(nn.Module):
         # Update cache
         self._update_cache(seq_len, x.device, x.dtype)
         
-        # Get cos/sin for current sequence
-        cos = self._cos_cached[:seq_len, :head_dim].unsqueeze(0).unsqueeze(0)
-        sin = self._sin_cached[:seq_len, :head_dim].unsqueeze(0).unsqueeze(0)
+        # Get cos/sin for current sequence (with Linux torch.compile cloning)
+        if _NEEDS_TENSOR_CLONING:
+            cos = self._cos_cached[:seq_len, :head_dim].clone().unsqueeze(0).unsqueeze(0)
+            sin = self._sin_cached[:seq_len, :head_dim].clone().unsqueeze(0).unsqueeze(0)
+        else:
+            cos = self._cos_cached[:seq_len, :head_dim].unsqueeze(0).unsqueeze(0)
+            sin = self._sin_cached[:seq_len, :head_dim].unsqueeze(0).unsqueeze(0)
         
         # Apply rotation
         x1, x2 = x[..., :head_dim//2], x[..., head_dim//2:]
@@ -112,12 +127,21 @@ class ModernAttention(nn.Module):
         self.dropout = config.dropout
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Linux torch.compile CUDAGraphs Fix: Clone attention inputs
+        if _NEEDS_TENSOR_CLONING:
+            x = x.clone()
+
         batch_size, seq_len = x.size(0), x.size(1)
-        
-        # 1. Project Q, K, V
-        q = self.q_proj(x)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
+
+        # 1. Project Q, K, V (with cloning for Linux torch.compile)
+        if _NEEDS_TENSOR_CLONING:
+            q = self.q_proj(x).clone()
+            k = self.k_proj(x).clone()
+            v = self.v_proj(x).clone()
+        else:
+            q = self.q_proj(x)
+            k = self.k_proj(x)
+            v = self.v_proj(x)
         
         # 2. Reshape into heads
         q = q.view(batch_size, seq_len, self.n_heads, self.d_k)
@@ -238,6 +262,10 @@ class ModernLLM(nn.Module):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the model."""
+        # Linux torch.compile CUDAGraphs Fix: Clone input to prevent overwriting
+        if _NEEDS_TENSOR_CLONING:
+            x = x.clone()
+
         # Token embeddings with scaling
         x = self.token_embedding(x) * math.sqrt(self.config.d_model)
         x = self.position_dropout(x)
@@ -281,4 +309,4 @@ if __name__ == "__main__":
         logits = model(x)
         print(f"   Input shape: {x.shape}")
         print(f"   Output shape: {logits.shape}")
-        print("✅ Model test passed!")
+        print(" Model test passed!")

@@ -5,6 +5,7 @@
 # Einfach die Werte hier ändern - werden automatisch von allen Komponenten verwendet.
 
 # %%
+import os
 from dataclasses import dataclass
 from typing import Optional, List
 
@@ -71,7 +72,7 @@ class TrainingConfig:
     torch_compile_mode: str = "max-autotune"  # "default", "reduce-overhead", "max-autotune"
     use_mixed_precision: bool = True
     mixed_precision_dtype: str = "bfloat16"  # "bfloat16", "float16"
-    use_activation_checkpointing: bool = False  # Memory vs Speed tradeoff
+    use_activation_checkpointing: bool = True  # Memory vs Speed tradeoff
 
     # Monitoring & Logging
     log_interval: int = 10
@@ -139,9 +140,22 @@ class DatasetConfig:
     default_dataset: str = "fineweb-edu"  # "fineweb-edu", "custom"
 
     # FineWeb-Edu Settings
-    fineweb_cache_dir: str = "cache/fineweb"
+    # Verwendet HuggingFace Standard-Cache (plattformübergreifend)
+    # Windows: C:\Users\{user}\.cache\huggingface\hub
+    # Linux: ~/.cache/huggingface/hub
+    fineweb_cache_dir: str = os.path.expanduser("~/.cache/huggingface/hub")
     fineweb_streaming: bool = True
     fineweb_num_samples: int = 10000  # Default sample size
+
+    # Dataset Size Profile Selection
+    # Verfügbare Profile:
+    # - "tiny": 1k samples, ~5 min training (quick testing)
+    # - "small": 10k samples, ~30 min training (development)
+    # - "medium": 300k samples, ~15 hours training (serious training)
+    # - "large": 1M samples, ~2 days training (production-ready)
+    # - "production": 10M samples, ~1-2 weeks training (full production)
+    # - "full": All samples, ~months training (complete dataset)
+    default_dataset_size: str = "medium"
 
     # Dataset Size Presets
     dataset_sizes: dict = None
@@ -162,10 +176,10 @@ class DatasetConfig:
                     "training_time": "~30 minutes"
                 },
                 "medium": {
-                    "num_samples": 100000,
+                    "num_samples": 300000,
                     "description": "Medium sample (FineWeb-Edu sample-10BT)",
-                    "estimated_tokens": "~20M tokens",
-                    "training_time": "~5 hours",
+                    "estimated_tokens": "~60M tokens",
+                    "training_time": "~15 hours",
                     "dataset_size": "~27GB"
                 },
                 "large": {

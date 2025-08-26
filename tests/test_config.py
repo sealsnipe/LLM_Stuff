@@ -5,7 +5,11 @@
 # Testet die neue zentrale Konfiguration.
 
 # %%
-from config import model_config, training_config, inference_config, hardware_config, system_config
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config import model_config, training_config, dataset_config, hardware_config, system_config
 
 def test_config():
     """Teste die zentrale Konfiguration."""
@@ -55,10 +59,9 @@ def test_config():
     print(f"   torch.compile: {training_config.use_torch_compile}")
     print(f"   Mixed Precision: {training_config.use_mixed_precision}")
     print()
-    print(f"🎯 Inference Config:")
-    print(f"   Temperature: {inference_config.temperature}")
-    print(f"   Top-p: {inference_config.top_p}")
-    print(f"   Max Length: {inference_config.max_length}")
+    print(f"📊 Dataset Config:")
+    print(f"   Default Size: {dataset_config.default_dataset_size}")
+    print(f"   Available Profiles: {list(dataset_config.dataset_sizes.keys())}")
     print()
     print(f"🖥️  Hardware Config:")
     print(f"   Device: {hardware_config.device}")

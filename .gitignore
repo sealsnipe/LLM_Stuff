@@ -102,3 +102,16 @@ tensorboard/
 *.temp
 temp/
 tmp/
+
+# === PROJECT SPECIFIC ===
+
+# Alte/veraltete Dateien (nicht ins Repository)
+old/
+
+# Dataset Cache (zu groß für Git)
+cache/
+
+# Compiler Artifacts
+*.exp
+*.lib
+*.obj
