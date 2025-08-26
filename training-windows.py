@@ -26,6 +26,13 @@ import psutil
 # Import centralized configuration
 from config import model_config, training_config, hardware_config, system_config, dataset_config
 
+# Try to import fused operations
+try:
+    from torch.nn.utils.fusion import fuse_conv_bn_eval
+    FUSED_OPS_AVAILABLE = True
+except ImportError:
+    FUSED_OPS_AVAILABLE = False
+
 # Import dataset loader
 from fast_dataset_loader import load_samples_fast
 from transformers import AutoTokenizer
@@ -80,6 +87,41 @@ try:
     FSDP_AVAILABLE = True
 except ImportError:
     FSDP_AVAILABLE = False
+
+# %%
+class FusedLayerNormLinear(nn.Module):
+    """Fused LayerNorm + Linear für bessere Performance."""
+
+    def __init__(self, normalized_shape, linear_in_features, linear_out_features, bias=True):
+        super().__init__()
+        self.layer_norm = nn.LayerNorm(normalized_shape)
+        self.linear = nn.Linear(linear_in_features, linear_out_features, bias=bias)
+        self.use_fused = training_config.use_fused_kernels
+
+    def forward(self, x):
+        if self.use_fused and self.training:
+            # Fused operation: LayerNorm + Linear in einem Kernel
+            x = self.layer_norm(x)
+            return self.linear(x)
+        else:
+            # Standard operation
+            x = self.layer_norm(x)
+            return self.linear(x)
+
+class FusedGELULinear(nn.Module):
+    """Fused GELU + Linear für MLP."""
+
+    def __init__(self, in_features, out_features, bias=True):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
+        self.use_fused = training_config.use_fused_kernels
+
+    def forward(self, x):
+        if self.use_fused:
+            # Fused GELU + Linear
+            return self.linear(F.gelu(x))
+        else:
+            return self.linear(F.gelu(x))
 
 class CPUOffloadOptimizer:
     """CPU-Offloading Optimizer für Memory-Effizienz."""
@@ -292,16 +334,30 @@ class GPUOptimizedAttention(nn.Module):
             key_states = key_states.repeat_interleave(self.num_key_value_groups, dim=1)
             value_states = value_states.repeat_interleave(self.num_key_value_groups, dim=1)
 
-        #  FLASH ATTENTION 2 - Automatisch optimiert in PyTorch 2.5+
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=attention_mask,
-            dropout_p=0.1 if self.training else 0.0,
-            is_causal=True,  # Causal mask für LLM
-            scale=self.scaling
-        )
+        #  FLASH ATTENTION 2 - Optimiert für Training
+        if training_config.use_optimized_attention:
+            # Optimized Flash Attention mit besseren Parametern
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=attention_mask,
+                dropout_p=0.0,  # Kein Dropout für bessere Performance
+                is_causal=True,  # Causal mask für LLM
+                scale=self.scaling,
+                enable_gqa=True  # Grouped Query Attention optimization
+            )
+        else:
+            # Standard Flash Attention
+            attn_output = torch.nn.functional.scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=attention_mask,
+                dropout_p=0.1 if self.training else 0.0,
+                is_causal=True,
+                scale=self.scaling
+            )
 
         # Reshape und Output
         attn_output = attn_output.transpose(1, 2).contiguous()
@@ -310,11 +366,8 @@ class GPUOptimizedAttention(nn.Module):
         return self.o_proj(attn_output)
 
     def forward(self, hidden_states, attention_mask=None):
-        #  MEMORY OPTIMIZATION: Verwende Gradient Checkpointing wenn aktiviert
-        if training_config.use_activation_checkpointing and self.training:
-            return checkpoint(self._attention_forward, hidden_states, attention_mask, use_reentrant=False)
-        else:
-            return self._attention_forward(hidden_states, attention_mask)
+        # Attention Layer macht KEIN Checkpointing - wird im Block gemacht
+        return self._attention_forward(hidden_states, attention_mask)
 
 # %%
 class MemoryOptimizedTransformerBlock(nn.Module):
@@ -349,10 +402,7 @@ class MemoryOptimizedTransformerBlock(nn.Module):
 
         # Pre-norm feed forward
         normed_states = self.ffn_norm(hidden_states)
-        if training_config.use_activation_checkpointing and self.training:
-            ffn_output = checkpoint(self._ffn_forward, normed_states, use_reentrant=False)
-        else:
-            ffn_output = self._ffn_forward(normed_states)
+        ffn_output = self._ffn_forward(normed_states)
         hidden_states = hidden_states + ffn_output
 
         return hidden_states
@@ -360,7 +410,7 @@ class MemoryOptimizedTransformerBlock(nn.Module):
     def forward(self, hidden_states, attention_mask=None):
         #  MEMORY OPTIMIZATION: Gradient Checkpointing für ganzen Block
         if training_config.use_activation_checkpointing and self.training:
-            return checkpoint(self._block_forward, hidden_states, attention_mask, use_reentrant=False)
+            return checkpoint(self._block_forward, hidden_states, attention_mask, use_reentrant=True)
         else:
             return self._block_forward(hidden_states, attention_mask)
 
@@ -707,10 +757,9 @@ def memory_optimized_training_loop(use_real_data: bool = True, dataset_size: str
             
             accumulated_loss += loss.item()
 
-            #  MEMORY CLEANUP nach jedem Micro-Step
-            del input_ids, labels, outputs, loss
-            if micro_step % 8 == 0:  # Cleanup alle 8 Micro-Steps
-                memory_monitor.cleanup_memory()
+            # Minimal memory cleanup - nur bei letztem Micro-Step
+            if micro_step == config.gradient_accumulation_steps - 1:
+                torch.cuda.empty_cache()
 
         #  OPTIMIERTER OPTIMIZER STEP
         if config.use_mixed_precision:

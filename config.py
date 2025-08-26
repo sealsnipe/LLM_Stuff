@@ -74,6 +74,16 @@ class TrainingConfig:
     mixed_precision_dtype: str = "bfloat16"  # "bfloat16", "float16"
     use_activation_checkpointing: bool = True  # Memory vs Speed tradeoff
 
+    # Advanced Speed Optimizations
+    use_flash_attention: bool = True  # Faster attention computation (already active)
+    use_fused_kernels: bool = True   # Fused LayerNorm+Linear operations
+    use_optimized_attention: bool = True  # Optimized attention patterns
+
+    # Advanced Speed Optimizations
+    use_flash_attention: bool = True  # Faster attention computation
+    use_fused_kernels: bool = True   # Fused operations where possible
+    dataloader_prefetch_factor: int = 4  # Increased prefetching
+
     # Monitoring & Logging
     log_interval: int = 10
     eval_interval: int = 500
@@ -84,7 +94,7 @@ class TrainingConfig:
     dataloader_num_workers: int = 4
     dataloader_pin_memory: bool = True
     dataloader_persistent_workers: bool = True
-    dataloader_prefetch_factor: int = 2
+    dataloader_prefetch_factor: int = 4  # Increased for better GPU utilization
 
 # === INFERENCE CONFIGURATION ===
 @dataclass

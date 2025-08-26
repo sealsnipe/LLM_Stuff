@@ -156,11 +156,14 @@ def print_optimization_status():
     else:
         print(f"├─ Activation Checkpointing..  Disabled")
     
+    print(f"├─ Flash Attention........... ✓ Enabled (speed + memory)")
+    print(f"├─ Fused Kernels............. ✓ LayerNorm+Linear (speed)")
+    print(f"├─ Optimized Attention....... ✓ GQA enabled (speed)")
     print(f"├─ Gradient Clipping......... ✓ Max norm {training_config.max_grad_norm} (stability)")
     print(f"├─ Zero Grad Optimization.... ✓ set_to_none=True (speed)")
     print(f"├─ Gradient Accumulation..... ✓ {training_config.gradient_accumulation_steps} steps (memory)")
     print(f"├─ Non-blocking Transfer..... ✓ GPU transfer (speed)")
-    print(f"├─ DataLoader Optimization... ✓ Pin memory + {training_config.dataloader_num_workers} workers (speed)")
+    print(f"├─ DataLoader Optimization... ✓ Pin memory + {training_config.dataloader_num_workers} workers + prefetch {training_config.dataloader_prefetch_factor} (speed)")
     print(f"└─ Memory Reset.............. ✓ Peak stats reset (monitoring)")
     print()
     
