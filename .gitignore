@@ -111,6 +111,12 @@ old/
 # Dataset Cache (zu groß für Git)
 cache/
 
+# Trainierte Modelle (zu groß für Git)
+trained_models/
+
+# Berichte und Analysen (lokal, nicht ins Repository)
+reports/
+
 # Compiler Artifacts
 *.exp
 *.lib

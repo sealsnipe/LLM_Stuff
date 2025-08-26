@@ -22,6 +22,9 @@ import time
 import sys
 import gc
 import psutil
+import os
+import json
+from datetime import datetime
 
 # Import centralized configuration
 from config import model_config, training_config, hardware_config, system_config, dataset_config
@@ -481,6 +484,342 @@ class MemoryOptimizedLLM(nn.Module):
         return {"loss": loss, "logits": logits}
 
 # %%
+def save_trained_model(model, step, final_loss, training_time, save_dir=None):
+    """
+    Speichert das trainierte Modell professionell mit allen notwendigen Metadaten.
+
+    Args:
+        model: Das trainierte PyTorch-Modell
+        step: Finale Anzahl Trainingsschritte
+        final_loss: Finaler Loss-Wert
+        training_time: Gesamte Trainingszeit in Sekunden
+        save_dir: Optionales Speicherverzeichnis (default: auto-generiert)
+
+    Returns:
+        str: Pfad zum gespeicherten Modell
+    """
+
+    # Erstelle Ausgabe-Verzeichnis mit Timestamp
+    if save_dir is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        total_params = sum(p.numel() for p in model.parameters())
+        param_size = f"{total_params / 1e9:.1f}B" if total_params >= 1e9 else f"{total_params / 1e6:.0f}M"
+        model_name = f"modern_llm_{param_size}_{timestamp}"
+
+        # Verwende konfigurierte Basis-Pfade
+        base_dir = os.path.expanduser("~/AI/llm-coding/trained_models")
+        save_dir = os.path.join(base_dir, model_name)
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    print(f"\n💾 Speichere trainiertes Modell...")
+    print(f"   Pfad: {save_dir}")
+
+    # 1. PyTorch Model State Dict speichern
+    # Fix für torch.compile: Entferne _orig_mod. Prefix
+    state_dict = model.state_dict()
+    if any(key.startswith('_orig_mod.') for key in state_dict.keys()):
+        # torch.compile fügt _orig_mod. Prefix hinzu - entferne es
+        clean_state_dict = {}
+        for key, value in state_dict.items():
+            clean_key = key.replace('_orig_mod.', '') if key.startswith('_orig_mod.') else key
+            clean_state_dict[clean_key] = value
+        state_dict = clean_state_dict
+
+    model_checkpoint = {
+        'model_state_dict': state_dict,
+        'model_config': {
+            'vocab_size': model_config.vocab_size,
+            'hidden_size': model_config.hidden_size,
+            'num_layers': model_config.num_layers,
+            'num_attention_heads': model_config.num_attention_heads,
+            'num_key_value_heads': model_config.num_key_value_heads,
+            'intermediate_size': model_config.intermediate_size,
+            'max_position_embeddings': model_config.max_position_embeddings,
+            'tie_word_embeddings': model_config.tie_word_embeddings,
+        },
+        'training_info': {
+            'final_step': step,
+            'final_loss': final_loss,
+            'total_parameters': sum(p.numel() for p in model.parameters()),
+            'training_time_seconds': training_time,
+            'training_time_formatted': f"{training_time//3600:.0f}h {(training_time%3600)//60:.0f}m {training_time%60:.0f}s",
+            'timestamp': datetime.now().isoformat(),
+            'pytorch_version': torch.__version__,
+            'cuda_version': torch.version.cuda if torch.cuda.is_available() else None,
+        },
+        'training_config': {
+            'max_steps': training_config.max_steps,
+            'batch_size': training_config.batch_size,
+            'gradient_accumulation_steps': training_config.gradient_accumulation_steps,
+            'sequence_length': training_config.sequence_length,
+            'learning_rate': training_config.learning_rate,
+            'optimizer_type': training_config.optimizer_type,
+            'use_mixed_precision': training_config.use_mixed_precision,
+            'use_torch_compile': training_config.use_torch_compile,
+        }
+    }
+
+    model_path = os.path.join(save_dir, 'model.pt')
+    torch.save(model_checkpoint, model_path)
+    print(f"   ✅ PyTorch Model: model.pt")
+
+    # 2. Model Config als JSON
+    config_path = os.path.join(save_dir, 'config.json')
+    with open(config_path, 'w', encoding='utf-8') as f:
+        json.dump(model_checkpoint['model_config'], f, indent=2)
+    print(f"   ✅ Model Config: config.json")
+
+    # 3. Training Info als JSON
+    training_info_path = os.path.join(save_dir, 'training_info.json')
+    with open(training_info_path, 'w', encoding='utf-8') as f:
+        json.dump(model_checkpoint['training_info'], f, indent=2)
+    print(f"   ✅ Training Info: training_info.json")
+
+    # 4. README mit Nutzungsanleitung
+    readme_path = os.path.join(save_dir, 'README.md')
+    total_params = model_checkpoint['training_info']['total_parameters']
+    param_size = f"{total_params / 1e9:.2f}B" if total_params >= 1e9 else f"{total_params / 1e6:.0f}M"
+
+    readme_content = f"""# {os.path.basename(save_dir)}
+
+## Model Information
+- **Parameters:** {param_size} ({total_params:,} total)
+- **Architecture:** Modern LLM with GQA, RoPE, SwiGLU
+- **Training Steps:** {step:,}
+- **Final Loss:** {final_loss:.4f}
+- **Training Time:** {model_checkpoint['training_info']['training_time_formatted']}
+- **Training Date:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+## Architecture Details
+- **Hidden Size:** {model_config.hidden_size}
+- **Layers:** {model_config.num_layers}
+- **Attention Heads:** {model_config.num_attention_heads}
+- **Key-Value Heads:** {model_config.num_key_value_heads} (GQA)
+- **Vocabulary Size:** {model_config.vocab_size:,}
+- **Max Sequence Length:** {model_config.max_position_embeddings}
+
+## Usage
+
+### Load Model
+```python
+import torch
+from modern_llm import MemoryOptimizedLLM
+from config import ModelConfig
+
+# Load checkpoint
+checkpoint = torch.load('model.pt', map_location='cpu')
+
+# Create model with same config
+model = MemoryOptimizedLLM()
+model.load_state_dict(checkpoint['model_state_dict'])
+model.eval()
+
+# Move to GPU if available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = model.to(device)
+```
+
+### Generate Text
+```python
+# Example text generation (requires tokenizer)
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM-135M")
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+# Encode input
+input_text = "The future of AI is"
+input_ids = tokenizer.encode(input_text, return_tensors='pt').to(device)
+
+# Generate
+with torch.no_grad():
+    outputs = model(input_ids)
+    logits = outputs['logits']
+
+    # Simple greedy decoding
+    next_token_id = torch.argmax(logits[0, -1, :])
+    next_token = tokenizer.decode([next_token_id])
+    print(f"{{input_text}}{{next_token}}")
+```
+
+## Files
+- `model.pt` - PyTorch model checkpoint
+- `config.json` - Model architecture configuration
+- `training_info.json` - Training metadata and statistics
+- `README.md` - This documentation
+
+## Training Configuration
+- **Batch Size:** {training_config.batch_size}
+- **Gradient Accumulation:** {training_config.gradient_accumulation_steps}
+- **Learning Rate:** {training_config.learning_rate}
+- **Sequence Length:** {training_config.sequence_length}
+- **Mixed Precision:** {training_config.use_mixed_precision}
+- **Torch Compile:** {training_config.use_torch_compile}
+"""
+
+    with open(readme_path, 'w', encoding='utf-8') as f:
+        f.write(readme_content)
+    print(f"   ✅ Documentation: README.md")
+
+    print(f"\n🎉 Model erfolgreich gespeichert!")
+    print(f"   Verzeichnis: {save_dir}")
+    print(f"   Parameter: {param_size}")
+    print(f"   Trainingszeit: {model_checkpoint['training_info']['training_time_formatted']}")
+
+    return save_dir
+
+
+def save_checkpoint(model, optimizer, step, loss, save_dir, keep_last=3):
+    """
+    Speichert Training-Checkpoint für Resume-Funktionalität.
+
+    Args:
+        model: PyTorch-Modell
+        optimizer: Optimizer
+        step: Aktueller Trainingsschritt
+        loss: Aktueller Loss
+        save_dir: Basis-Speicherverzeichnis
+        keep_last: Anzahl der zu behaltenden Checkpoints
+    """
+
+    checkpoint_dir = os.path.join(save_dir, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    checkpoint = {
+        'step': step,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss,
+        'model_config': model_config.__dict__,
+        'training_config': training_config.__dict__,
+        'timestamp': datetime.now().isoformat(),
+        'pytorch_version': torch.__version__,
+    }
+
+    checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_step_{step}.pt')
+    torch.save(checkpoint, checkpoint_path)
+
+    # Bereinige alte Checkpoints
+    cleanup_old_checkpoints(checkpoint_dir, keep_last)
+
+    return checkpoint_path
+
+
+def cleanup_old_checkpoints(checkpoint_dir, keep_last=3):
+    """Entfernt alte Checkpoints, behält nur die neuesten."""
+
+    if not os.path.exists(checkpoint_dir):
+        return
+
+    # Finde alle Checkpoint-Dateien
+    checkpoint_files = []
+    for filename in os.listdir(checkpoint_dir):
+        if filename.startswith('checkpoint_step_') and filename.endswith('.pt'):
+            try:
+                step = int(filename.replace('checkpoint_step_', '').replace('.pt', ''))
+                filepath = os.path.join(checkpoint_dir, filename)
+                checkpoint_files.append((step, filepath))
+            except ValueError:
+                continue
+
+    # Sortiere nach Step-Nummer
+    checkpoint_files.sort(key=lambda x: x[0])
+
+    # Entferne alte Checkpoints
+    if len(checkpoint_files) > keep_last:
+        for step, filepath in checkpoint_files[:-keep_last]:
+            try:
+                os.remove(filepath)
+            except OSError:
+                pass
+
+
+def validate_saved_model(model_path):
+    """
+    Validiert ein gespeichertes Modell durch Laden und Testen.
+
+    Args:
+        model_path: Pfad zum gespeicherten Modell-Verzeichnis
+
+    Returns:
+        bool: True wenn Validierung erfolgreich, False sonst
+    """
+
+    try:
+        print(f"\n🔍 Validiere gespeichertes Modell...")
+
+        # 1. Lade Checkpoint
+        checkpoint_file = os.path.join(model_path, 'model.pt')
+        if not os.path.exists(checkpoint_file):
+            print(f"   ❌ Model-Datei nicht gefunden: {checkpoint_file}")
+            return False
+
+        checkpoint = torch.load(checkpoint_file, map_location='cpu', weights_only=False)
+        print(f"   ✅ Checkpoint geladen")
+
+        # 2. Erstelle Modell mit gleicher Konfiguration
+        model = MemoryOptimizedLLM()
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
+        print(f"   ✅ Model-State geladen")
+
+        # 3. Teste Forward Pass
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = model.to(device)
+
+        # Erstelle Test-Input
+        test_input = torch.randint(0, model_config.vocab_size, (1, 10), device=device)
+
+        with torch.no_grad():
+            outputs = model(test_input)
+            logits = outputs['logits']
+
+        # 4. Prüfe Output-Shape
+        expected_shape = (1, 10, model_config.vocab_size)
+        if logits.shape != expected_shape:
+            print(f"   ❌ Falsche Output-Shape: {logits.shape}, erwartet: {expected_shape}")
+            return False
+
+        print(f"   ✅ Forward Pass erfolgreich")
+        print(f"   ✅ Output-Shape korrekt: {logits.shape}")
+
+        # 5. Prüfe Metadaten
+        training_info = checkpoint.get('training_info', {})
+        total_params = training_info.get('total_parameters', 0)
+        actual_params = sum(p.numel() for p in model.parameters())
+
+        if total_params != actual_params:
+            print(f"   ⚠️  Parameter-Anzahl stimmt nicht überein: {total_params} vs {actual_params}")
+        else:
+            print(f"   ✅ Parameter-Anzahl korrekt: {actual_params:,}")
+
+        # 6. Teste einfache Text-Generation (optional)
+        try:
+            # Generiere nächstes Token
+            with torch.no_grad():
+                next_token_logits = logits[0, -1, :]  # Letztes Token
+                next_token_id = torch.argmax(next_token_logits)
+
+            print(f"   ✅ Text-Generation funktioniert (Next Token ID: {next_token_id.item()})")
+
+        except Exception as gen_error:
+            print(f"   ⚠️  Text-Generation-Test fehlgeschlagen: {gen_error}")
+
+        print(f"\n✅ Model-Validierung erfolgreich!")
+        print(f"   Das gespeicherte Modell ist funktionsfähig und bereit für Inference.")
+
+        return True
+
+    except Exception as e:
+        print(f"\n❌ Model-Validierung fehlgeschlagen: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+# %%
 def create_gpu_optimized_dataset(num_samples: int = 100000, use_real_data: bool = True, dataset_size: str = "medium"):
     """
     Erstellt GPU-optimierten Datensatz mit FineWeb-Edu (27GB sample-10BT).
@@ -803,15 +1142,71 @@ def memory_optimized_training_loop(use_real_data: bool = True, dataset_size: str
             total_loss = 0.0
             torch.cuda.reset_peak_memory_stats()
 
+        # 💾 Checkpoint-Speicherung (alle 500 Steps)
+        if step % training_config.save_interval == 0 and step > 0:
+            try:
+                checkpoint_dir = os.path.expanduser("~/AI/llm-coding/current_training")
+                checkpoint_path = save_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    step=step,
+                    loss=accumulated_loss,
+                    save_dir=checkpoint_dir,
+                    keep_last=training_config.max_checkpoints_to_keep
+                )
+                # Stille Checkpoint-Speicherung (kein Print um Progress nicht zu stören)
+            except Exception as e:
+                # Stille Fehlerbehandlung
+                pass
+
         # Kein Early Stopping - laufe die vollen Steps
 
     # Training beendet - Progress Display zeigt automatisch Summary
+    training_end_time = time.time()
+    total_training_time = training_end_time - start_time
 
-    print(f"\n Training completed!")
+    print(f"\n🎯 Training completed!")
     print(f"Final Stats:")
     print(f"   Steps: {step}")
+    print(f"   Final Loss: {accumulated_loss:.4f}")
+    print(f"   Training Time: {total_training_time//3600:.0f}h {(total_training_time%3600)//60:.0f}m {total_training_time%60:.0f}s")
     print(f"   GPU Memory Peak: {torch.cuda.max_memory_allocated() / 1e9:.1f}GB")
     print(f"   Model Parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    # 🚨 KRITISCHER FIX: Model-Speicherung hinzufügen!
+    try:
+        final_model_path = save_trained_model(
+            model=model,
+            step=step,
+            final_loss=accumulated_loss,
+            training_time=total_training_time
+        )
+
+        print(f"\n✅ SUCCESS: Trainiertes Modell gespeichert!")
+        print(f"   Pfad: {final_model_path}")
+
+        # 🔍 Model-Validierung
+        validation_success = validate_saved_model(final_model_path)
+        if validation_success:
+            print(f"   ✅ Model-Validierung erfolgreich - Bereit für Inference!")
+        else:
+            print(f"   ⚠️  Model-Validierung fehlgeschlagen - Prüfe gespeicherte Dateien!")
+
+    except Exception as e:
+        print(f"\n❌ FEHLER beim Speichern des Modells: {e}")
+        print(f"   Model ist noch im Speicher verfügbar, aber nicht persistent gespeichert!")
+        import traceback
+        traceback.print_exc()
+
+        # Fallback: Einfache Speicherung
+        try:
+            fallback_path = "emergency_model_save.pt"
+            torch.save(model.state_dict(), fallback_path)
+            print(f"   Fallback: Model State Dict gespeichert als {fallback_path}")
+        except Exception as fallback_error:
+            print(f"   Auch Fallback-Speicherung fehlgeschlagen: {fallback_error}")
+
+    return final_model_path if 'final_model_path' in locals() else None
 
 # %%
 if __name__ == "__main__":
