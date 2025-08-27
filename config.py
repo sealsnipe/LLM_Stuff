@@ -38,19 +38,70 @@ class ModelConfig:
     layer_norm_eps: float = 1e-6
     initializer_range: float = 0.02
 
+    # Compatibility aliases for modern_llm.py
+    @property
+    def d_model(self) -> int:
+        return self.hidden_size
+
+    @property
+    def n_layers(self) -> int:
+        return self.num_layers
+
+    @property
+    def n_heads(self) -> int:
+        return self.num_attention_heads
+
+    @property
+    def n_kv_heads(self) -> int:
+        return self.num_key_value_heads
+
+    @property
+    def d_k(self) -> int:
+        return self.hidden_size // self.num_attention_heads
+
+    @property
+    def n_kv_groups(self) -> int:
+        return self.num_attention_heads // self.num_key_value_heads
+
+    @property
+    def d_ff(self) -> int:
+        return self.intermediate_size
+
+    @property
+    def dropout(self) -> float:
+        return self.dropout_prob
+
+    @property
+    def rms_norm_eps(self) -> float:
+        return self.layer_norm_eps
+
+    @property
+    def max_seq_len(self) -> int:
+        return self.max_position_embeddings
+
 # === TRAINING CONFIGURATION ===
 @dataclass
 class TrainingConfig:
     """Training Configuration."""
 
+    # NEW: Token-based Training Control
+    target_tokens: int = 100_000_000  # 100M tokens (quick test)
+    sequence_length: int = 384
+
     # Training Parameters
-    max_steps: int = 2000
     batch_size: int = 5
     gradient_accumulation_steps: int = 8  # Effective batch size: 40
-    sequence_length: int = 384
-    learning_rate: float = 5e-4
+    learning_rate: float = 3e-4  # Lower for stability
     weight_decay: float = 0.1
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 0.5  # Tighter clipping
+
+    # Calculated automatically from target_tokens
+    @property
+    def max_steps(self) -> int:
+        """Calculate steps needed for target tokens"""
+        effective_batch_size = self.batch_size * self.gradient_accumulation_steps
+        tokens_per_step = effective_batch_size * self.sequence_length
+        return self.target_tokens // tokens_per_step
 
     # Optimizer Settings
     optimizer_type: str = "adamw_fused"  # "adamw_fused", "adamw", "muon_hybrid"
@@ -165,55 +216,53 @@ class DatasetConfig:
     # - "large": 1M samples, ~2 days training (production-ready)
     # - "production": 10M samples, ~1-2 weeks training (full production)
     # - "full": All samples, ~months training (complete dataset)
-    default_dataset_size: str = "medium"
+    default_dataset_size: str = "auto"  # Use new token-based system
 
     # Dataset Size Presets
     dataset_sizes: dict = None
 
     def __post_init__(self):
         if self.dataset_sizes is None:
+            # NEW: Token-based dataset configuration
+            # Based on target_tokens from TrainingConfig
             self.dataset_sizes = {
-                "tiny": {
-                    "num_samples": 1000,
-                    "description": "Tiny sample for quick testing",
-                    "estimated_tokens": "~200K tokens",
-                    "training_time": "~5 minutes"
+                "test": {
+                    "target_tokens": 100_000_000,  # 100M tokens (quick test)
+                    "description": "Quick test run",
+                    "training_time": "~2 hours",
+                    "steps": "~6.5K"
                 },
                 "small": {
-                    "num_samples": 10000,
-                    "description": "Small sample for development",
-                    "estimated_tokens": "~2M tokens",
-                    "training_time": "~30 minutes"
+                    "target_tokens": 1_000_000_000,  # 1B tokens
+                    "description": "Small training run",
+                    "training_time": "~20 hours",
+                    "steps": "~65K"
                 },
                 "medium": {
-                    "num_samples": 300000,
-                    "description": "Medium sample (FineWeb-Edu sample-10BT)",
-                    "estimated_tokens": "~60M tokens",
-                    "training_time": "~15 hours",
-                    "dataset_size": "~27GB"
+                    "target_tokens": 5_000_000_000,  # 5B tokens
+                    "description": "Medium training run",
+                    "training_time": "~4 days",
+                    "steps": "~325K"
                 },
                 "large": {
-                    "num_samples": 1000000,
-                    "description": "Large sample (FineWeb-Edu sample-100BT)",
-                    "estimated_tokens": "~200M tokens",
-                    "training_time": "~2 days",
-                    "dataset_size": "~277GB"
+                    "target_tokens": 18_500_000_000,  # 18.5B tokens (minimum for 926M)
+                    "description": "Proper training (minimum viable)",
+                    "training_time": "~2 weeks",
+                    "steps": "~1.2M"
                 },
                 "production": {
-                    "num_samples": 10000000,
-                    "description": "Production training (FineWeb-Edu sample-350BT)",
-                    "estimated_tokens": "~2B tokens",
-                    "training_time": "~1-2 weeks",
-                    "dataset_size": "~388GB"
-                },
-                "full": {
-                    "num_samples": None,
-                    "description": "Full FineWeb-Edu dataset",
-                    "estimated_tokens": "~1.3T tokens",
-                    "training_time": "~months",
-                    "dataset_size": "~10.4TB"
+                    "target_tokens": 46_000_000_000,  # 46B tokens (optimal for 926M)
+                    "description": "Production training (optimal)",
+                    "training_time": "~1 month",
+                    "steps": "~3M"
                 }
             }
+
+    def get_samples_for_tokens(self, target_tokens: int) -> int:
+        """Calculate how many samples we need for target tokens"""
+        avg_tokens_per_sample = 200  # Conservative estimate for FineWeb
+        safety_margin = 1.5  # 50% extra for multiple epochs
+        return int((target_tokens * safety_margin) // avg_tokens_per_sample)
 
 # === SYSTEM CONFIGURATION ===
 @dataclass

@@ -820,15 +820,21 @@ def validate_saved_model(model_path):
 
 
 # %%
-def create_gpu_optimized_dataset(num_samples: int = 100000, use_real_data: bool = True, dataset_size: str = "medium"):
+def create_gpu_optimized_dataset(num_samples: int = None, use_real_data: bool = True, dataset_size: str = "auto"):
     """
-    Erstellt GPU-optimierten Datensatz mit FineWeb-Edu (27GB sample-10BT).
+    Erstellt GPU-optimierten Datensatz mit automatischer Token-basierter Größe.
 
     Args:
-        num_samples: Anzahl Samples (default: 100k für sample-10BT)
+        num_samples: Anzahl Samples (None = auto-calculate from target_tokens)
         use_real_data: Verwende echte FineWeb-Edu Daten
-        dataset_size: "medium" für sample-10BT (27GB), "large" für sample-100BT (277GB)
+        dataset_size: "auto" = calculate from training_config.target_tokens
     """
+
+    # Auto-calculate samples if not provided
+    if num_samples is None or dataset_size == "auto":
+        from config import training_config, dataset_config
+        num_samples = dataset_config.get_samples_for_tokens(training_config.target_tokens)
+        # Skip print to avoid Unicode issues
 
     if use_real_data:
         try:
@@ -927,7 +933,19 @@ def memory_optimized_training_loop(use_real_data: bool = True, dataset_size: str
     device = torch.device("cuda")
 
     # Silent dataset info gathering
-    config_info = dataset_config.dataset_sizes.get(dataset_size, {"num_samples": 100000})
+    if dataset_size == "auto":
+        # Use new token-based configuration
+        num_samples_temp = dataset_config.get_samples_for_tokens(training_config.target_tokens)
+        config_info = {"num_samples": num_samples_temp, "description": f"Auto-calculated for {training_config.target_tokens:,} tokens"}
+    else:
+        # Use old preset system with fallback
+        config_info = dataset_config.dataset_sizes.get(dataset_size, {"num_samples": 100000})
+
+        # Handle new token-based presets
+        if "target_tokens" in config_info and "num_samples" not in config_info:
+            target_tokens = config_info["target_tokens"]
+            num_samples_temp = dataset_config.get_samples_for_tokens(target_tokens)
+            config_info["num_samples"] = num_samples_temp
 
     #  PROFESSIONAL INITIALIZATION PIPELINE
     pipeline = InitializationPipeline()
@@ -1008,8 +1026,21 @@ def memory_optimized_training_loop(use_real_data: bool = True, dataset_size: str
     scaler = torch.amp.GradScaler('cuda') if config.use_mixed_precision else None
     
     # Dataset Discovery & Loading (SILENT)
-    config_info = dataset_config.dataset_sizes.get(dataset_size, {"num_samples": 100000})
-    num_samples = config_info["num_samples"]
+    if dataset_size == "auto":
+        # Use new token-based configuration
+        num_samples = dataset_config.get_samples_for_tokens(training_config.target_tokens)
+        config_info = {"num_samples": num_samples, "description": f"Auto-calculated for {training_config.target_tokens:,} tokens"}
+    else:
+        # Use old preset system with fallback
+        config_info = dataset_config.dataset_sizes.get(dataset_size, {"num_samples": 100000})
+
+        # Handle new token-based presets
+        if "target_tokens" in config_info and "num_samples" not in config_info:
+            target_tokens = config_info["target_tokens"]
+            num_samples = dataset_config.get_samples_for_tokens(target_tokens)
+            config_info["num_samples"] = num_samples
+        else:
+            num_samples = config_info.get("num_samples", 100000)
 
     # Step 1: Dataset Discovery
     time.sleep(1.0)  # Längere Pause
@@ -1165,7 +1196,7 @@ def memory_optimized_training_loop(use_real_data: bool = True, dataset_size: str
     training_end_time = time.time()
     total_training_time = training_end_time - start_time
 
-    print(f"\n🎯 Training completed!")
+    print(f"\nTraining completed!")
     print(f"Final Stats:")
     print(f"   Steps: {step}")
     print(f"   Final Loss: {accumulated_loss:.4f}")
@@ -1223,8 +1254,8 @@ if __name__ == "__main__":
     #  PROFESSIONAL SETUP DISPLAY
     print_professional_header()
 
-    # Start Training mit FineWeb-Edu (konfigurierbare Größe)
+    # Start Training mit FineWeb-Edu (token-basierte Größe)
     memory_optimized_training_loop(
         use_real_data=True,                                    #  FineWeb-Edu verwenden!
-        dataset_size=dataset_config.default_dataset_size      # Aus Config: medium, large, etc.
+        dataset_size="auto"                                    # Auto-calculate from target_tokens
     )

@@ -17,7 +17,7 @@ import math
 import platform
 from typing import Optional, Tuple
 # Import centralized configuration
-from config import model_config, training_config
+from config import model_config, training_config, ModelConfig
 
 # Platform-specific CUDAGraphs fix detection
 # Linux + torch.compile requires tensor cloning to prevent memory overwriting
