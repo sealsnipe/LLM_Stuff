@@ -51,7 +51,7 @@ class PackedCacheCreator:
         self.max_length = max_length
         self.use_compression = use_compression and HAS_LZ4
         
-    def create_cache(self, input_dir: str, output_dir: str, chunk_size: int = 10000):
+    def create_cache(self, input_dir: str, output_dir: str, chunk_size: int = 10000, coordination_info: dict = None):
         """
         🎯 Main method: Create packed cache with resume capability
         """
@@ -61,14 +61,28 @@ class PackedCacheCreator:
         print(f"   Max length: {self.max_length}")
         print(f"   Compression: {self.use_compression}")
         
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Check for existing progress
-        existing_chunks = self._find_existing_chunks(output_dir)
+        # 🎯 FIXED: Create proper directory structure like reverse script
+        final_output_dir = os.path.join(output_dir, "512", "FineWeb")
+        os.makedirs(final_output_dir, exist_ok=True)
+        print(f"📁 Using output directory: {final_output_dir}")
+
+        # 🎯 Use coordination info for proper chunk numbering
+        if coordination_info:
+            forward_range = coordination_info["chunk_strategy"]["forward_range"]
+            chunk_start = forward_range[0]
+            chunk_end = forward_range[1]
+            print(f"🎯 Using coordinated forward range: {chunk_start}-{chunk_end}")
+        else:
+            chunk_start = 0
+            chunk_end = 999999  # fallback
+            print(f"⚠️  No coordination info - using fallback range: {chunk_start}-{chunk_end}")
+
+        # Check for existing progress in the forward range
+        existing_chunks = self._find_existing_chunks_in_range(final_output_dir, chunk_start, chunk_end)
         start_chunk = len(existing_chunks)
-        
+
         if start_chunk > 0:
-            print(f"📦 Found {start_chunk} existing chunks - resuming from chunk {start_chunk}")
+            print(f"📦 Found {start_chunk} existing forward chunks - resuming from chunk {chunk_start + start_chunk}")
         
         # Reset global carry for clean start
         reset_global_carry()
@@ -80,21 +94,21 @@ class PackedCacheCreator:
             # Use custom streaming that saves chunks immediately
             total_saved = self._streaming_pack_and_save(
                 input_dir=input_dir,
-                output_dir=output_dir,
+                output_dir=final_output_dir,
                 chunk_size=chunk_size,
-                start_chunk=start_chunk,
+                start_chunk=chunk_start + start_chunk,  # Use coordinated start + existing count
                 start_time=start_time
             )
 
             # Finalize metadata (mark as complete)
-            self._finalize_metadata(output_dir, total_saved, start_time)
+            self._finalize_metadata(final_output_dir, total_saved, start_time)
             
             total_time = time.time() - start_time
             print(f"✅ Cache creation complete!")
             print(f"   Total chunks: {len(packed_chunks)}")
             print(f"   New chunks saved: {total_saved}")
             print(f"   Total time: {total_time/3600:.1f}h")
-            print(f"   Cache directory: {output_dir}")
+            print(f"   Cache directory: {final_output_dir}")
             
         except Exception as e:
             print(f"❌ Cache creation failed: {e}")
@@ -106,6 +120,26 @@ class PackedCacheCreator:
         pattern = os.path.join(output_dir, "packed_chunk_*.pt")
         existing = sorted(glob.glob(pattern))
         return existing
+
+    def _find_existing_chunks_in_range(self, output_dir: str, start_num: int, end_num: int) -> List[str]:
+        """Find existing chunk files within a specific number range"""
+        pattern = os.path.join(output_dir, "packed_chunk_*.pt")
+        all_chunks = sorted(glob.glob(pattern))
+
+        # Filter chunks within the specified range
+        range_chunks = []
+        for chunk_file in all_chunks:
+            # Extract chunk number from filename
+            basename = os.path.basename(chunk_file)
+            chunk_num_str = basename.split('_')[2].split('.')[0]
+            try:
+                chunk_num = int(chunk_num_str)
+                if start_num <= chunk_num <= end_num:
+                    range_chunks.append(chunk_file)
+            except ValueError:
+                continue
+
+        return range_chunks
     
     def _save_chunk(self, chunk_data: Dict, file_path: str) -> str:
         """Save chunk with optional compression and integrity check"""
@@ -153,7 +187,7 @@ class PackedCacheCreator:
     
     def _streaming_pack_and_save(self, input_dir: str, output_dir: str, chunk_size: int, start_chunk: int, start_time: float) -> int:
         """Stream processing with immediate chunk saving for resume capability"""
-        from optimized_sequence_packing import load_parquet_fast_pandas, pack_sequences_heap_optimized, reset_global_carry
+        from core.data.sequence_packing import load_parquet_fast_pandas, pack_sequences_heap_optimized, reset_global_carry
         import glob
 
         # Find all parquet files
@@ -169,13 +203,16 @@ class PackedCacheCreator:
         total_processed = 0
 
         # Calculate where to resume based on existing chunks
+        print(f"🔄 Calculating resume position for {start_chunk} existing chunks...")
         resume_file_idx, resume_batch_num = self._calculate_resume_position(
             parquet_files, chunk_size, start_chunk
         )
+        print(f"🎯 Resume position: file {resume_file_idx+1}, batch {resume_batch_num}")
 
         for file_idx, file_path in enumerate(parquet_files):
             # Skip files that are already processed
             if file_idx < resume_file_idx:
+                print(f"📁 Skipping file {file_idx+1}/{len(parquet_files)}: {os.path.basename(file_path)} (already processed)")
                 continue
 
             try:
@@ -193,6 +230,8 @@ class PackedCacheCreator:
 
                 # Determine starting batch for this file
                 start_batch = resume_batch_num if file_idx == resume_file_idx else 1
+                if start_batch > 1:
+                    print(f"   Resuming from batch {start_batch}/{total_chunks}")
 
                 # Process in chunks with immediate saving
                 for chunk_start in range((start_batch-1) * chunk_size, len(texts), chunk_size):

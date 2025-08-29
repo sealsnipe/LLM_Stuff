@@ -112,11 +112,13 @@ def validate_inputs(args):
             if not args.dry_run:
                 shutil.rmtree(args.output_dir)
         else:
-            existing_chunks = glob.glob(os.path.join(args.output_dir, "packed_chunk_*.pt"))
+            # 🎯 FIXED: Check in the correct subdirectory structure
+            final_output_dir = os.path.join(args.output_dir, "512", "FineWeb")
+            existing_chunks = glob.glob(os.path.join(final_output_dir, "packed_chunk_*.pt"))
             if existing_chunks:
                 print(f"📦 Found {len(existing_chunks)} existing chunks - will resume")
             else:
-                print(f"📁 Output directory exists but empty - will create cache")
+                print(f"📁 Output directory structure ready - will create cache")
     
     # Check compression availability
     if not args.no_compression:
@@ -249,7 +251,8 @@ def main():
         creator.create_cache(
             input_dir=args.input_dir,
             output_dir=args.output_dir,
-            chunk_size=args.chunk_size
+            chunk_size=args.chunk_size,
+            coordination_info=coordination_info
         )
         
         total_time = time.time() - start_time

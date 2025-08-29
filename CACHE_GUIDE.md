@@ -21,7 +21,7 @@ The cache generation follows a sophisticated flywheel pattern designed for maxim
 ### Basic Usage
 ```bash
 cd scripts
-python sequence_packing_cache.py
+python create_packed_cache.py --input_dir ../cache/fineweb --output_dir ../cache/packed_sequences
 ```
 
 ### Detailed Process Flow
@@ -118,7 +118,7 @@ python sequence_packing_cache.py
 
 ### Usage
 ```bash
-python sequence_packing_cache.py --mode inverse
+python create_packed_cache_reverse.py --input_dir ../cache/fineweb --output_dir ../cache/packed_sequences --chunk_size 10000
 ```
 
 ### Inverse Process Flow
