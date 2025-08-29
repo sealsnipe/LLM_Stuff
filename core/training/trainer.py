@@ -328,11 +328,10 @@ class Trainer:
     def train(self, dataloader, total_steps=None):
         """Main training loop."""
         if total_steps is None:
-            # FIXED: Always use current dynamic max_steps with cache info
+            # FIXED: Use config max_steps as fallback - step calculation should be done in interface
             if training_config.use_epoch_based_training:
-                from ..utils.dataset_utils import get_dataset_calculator
-                calculator = get_dataset_calculator(self.cache_info)
-                total_steps, _ = calculator.calculate_epoch_based_steps(training_config.target_epochs)
+                print("⚠️ Warning: total_steps not provided for epoch-based training, using config fallback")
+                total_steps = training_config.max_steps
             else:
                 total_steps = training_config.max_steps
 
@@ -342,8 +341,17 @@ class Trainer:
         model_name, run_id = self.load_checkpoint_if_needed()
         self.start_time = time.time()
 
-        # Update scheduler with actual total_steps and warmup_steps
+        # FIXED: Update scheduler with actual total_steps AFTER checkpoint loading
+        # This ensures we use the new dataset size, not the old checkpoint values
+        print(f"🔄 Updating scheduler for new dataset size: {total_steps:,} steps")
         self.scheduler = create_lr_scheduler(self.optimizer, total_steps)
+
+        # If we loaded a checkpoint, we need to manually set the scheduler to the correct step
+        if self.current_step > 0:
+            # Fast-forward scheduler to current step
+            for _ in range(self.current_step):
+                self.scheduler.step()
+            print(f"⚡ Scheduler fast-forwarded to step {self.current_step:,}")
 
         # Update warmup steps for status display
         if training_config.use_epoch_based_training:
@@ -356,6 +364,8 @@ class Trainer:
         from ..monitoring.professional_display import start_training_progress
         from ..monitoring.json_logger import initialize_json_logger
 
+        print(f"\nTraining started - Target steps: {total_steps:,}")
+        print("-" * 80)
         start_training_progress(total_steps)
 
         # Initialize JSON logger (use effective tokens per optimizer step)

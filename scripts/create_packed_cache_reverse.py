@@ -29,6 +29,7 @@ sys.path.append(parent_dir)
 from sequence_packing_cache import PackedCacheCreator
 from cache_coordination import CacheCoordinator, create_coordination_info
 from core.data.sequence_packing import reset_global_carry
+from unified_metadata_manager import UnifiedMetadataManager
 
 def analyze_parquet_files_reverse(input_dir: str) -> dict:
     """
@@ -313,6 +314,14 @@ class ReverseCacheCreator(PackedCacheCreator):
         start_time = time.time()
         
         try:
+            # Initialize metadata manager
+            final_output_dir = os.path.join(output_dir, "512", "FineWeb")
+            metadata_manager = UnifiedMetadataManager(final_output_dir)
+
+            # Create reverse process metadata
+            chunk_range = (coordination_info['reverse_range'][0], coordination_info['reverse_range'][1])
+            metadata_manager.create_process_metadata('reverse', chunk_range, self.max_length, self.tokenizer.name_or_path)
+
             total_saved = self._streaming_pack_and_save_reverse(
                 input_dir=input_dir,
                 output_dir=output_dir,
@@ -320,11 +329,13 @@ class ReverseCacheCreator(PackedCacheCreator):
                 start_chunk=start_chunk,
                 coordination_info=coordination_info
             )
-            
-            # Create metadata in the correct directory
-            final_output_dir = os.path.join(output_dir, "512", "FineWeb")
-            self._save_metadata(final_output_dir, [], start_time, total_saved)
-            
+
+            # Finalize reverse process metadata
+            metadata_manager.finalize_process_metadata('reverse')
+
+            # Create unified metadata (merges with any existing forward metadata)
+            metadata_manager.create_unified_metadata()
+
             total_time = time.time() - start_time
             print(f"✅ REVERSE cache creation complete!")
             print(f"   Total chunks: {total_saved}")

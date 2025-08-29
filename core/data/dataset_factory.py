@@ -191,19 +191,44 @@ class DatasetFactory:
             if cache_path:
                 cache_dir = cache_path
             else:
-                cache_dir = training_config.packed_cache_dir
+                # FIXED: Look for actual cache directories with chunks
+                base_cache_dir = training_config.packed_cache_dir
 
-            if not os.path.exists(cache_dir):
-                return None
+                # Try common cache locations
+                possible_dirs = [
+                    os.path.join(base_cache_dir, "512", "FineWeb"),
+                    os.path.join(base_cache_dir, "1024", "FineWeb"),
+                    os.path.join(base_cache_dir, "2048", "FineWeb"),
+                    base_cache_dir
+                ]
 
-            # Check for cache files
-            cache_files = [f for f in os.listdir(cache_dir) if f.startswith('packed_chunk_') and f.endswith('.pt')]
+                cache_dir = None
+                for dir_path in possible_dirs:
+                    if os.path.exists(dir_path):
+                        # Check for cache files
+                        cache_files = [f for f in os.listdir(dir_path) if f.startswith('packed_chunk_') and f.endswith('.pt')]
+                        if cache_files:
+                            cache_dir = dir_path
+                            print(f"📦 Found packed cache: {cache_dir} ({len(cache_files)} chunks)")
+                            break
 
-            if not cache_files:
-                return None
+                if not cache_dir:
+                    print(f"⚠️ No packed cache found in {base_cache_dir}")
+                    return None
 
             # Use the original sequence_packing_cache system
-            from sequence_packing_cache import create_packed_dataloader
+            import sys
+            import os
+            scripts_path = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts')
+            if scripts_path not in sys.path:
+                sys.path.append(scripts_path)
+
+            # Import with fallback
+            try:
+                from sequence_packing_cache import create_packed_dataloader
+            except ImportError as e:
+                print(f"⚠️ Could not import sequence_packing_cache: {e}")
+                return None
 
             dataloader = create_packed_dataloader(
                 cache_dir=cache_dir,
@@ -212,9 +237,13 @@ class DatasetFactory:
                 num_workers=0  # Windows compatibility
             )
 
+            print(f"✅ Using packed cache dataset: {cache_dir}")
             return dataloader
 
         except Exception as e:
+            print(f"⚠️ Error creating packed cache dataset: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
 

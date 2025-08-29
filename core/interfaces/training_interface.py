@@ -267,13 +267,41 @@ class TrainingInterface:
             # Main Training Loop - FIXED: Use dynamic steps for epoch-based training
             if training_config.use_epoch_based_training:
                 from ..utils.dataset_utils import get_dataset_calculator
-                # Use current cache info for accurate calculation
-                cache_info = self.training_mode.get('cache_info') if self.training_mode else None
 
-                # FIXED: For new training without packed cache, don't use old cache_info
+                # FIXED: Use FRESH cache info calculation, same as dataset creation
+                if training_config.use_packed_cache:
+                    # Force fresh cache info calculation
+                    from ..utils.dataset_utils import DatasetSizeCalculator
+                    fresh_calculator = DatasetSizeCalculator()
+                    fresh_cache_size = fresh_calculator.get_packed_cache_size()
+                    if fresh_cache_size:
+                        total_sequences, total_tokens = fresh_cache_size
+                        cache_info = {
+                            'total_sequences': total_sequences,
+                            'total_tokens': total_tokens,
+                            'sequence_length': 512,
+                            'dataset_name': 'FineWeb'
+                        }
+                        print(f"🔄 Using FRESH cache info: {total_sequences:,} sequences")
+                    else:
+                        cache_info = None
+                        print(f"🔄 No fresh cache info available")
+                else:
+                    # Use cache info from training mode
+                    cache_info = self.training_mode.get('cache_info') if self.training_mode else None
+
+                # FIXED: Only reset cache_info if we're NOT using packed cache AND NOT loading checkpoint
+                # If we're using packed cache, always keep cache_info for correct step calculation
                 if (self.training_mode.get('mode') != 'checkpoint' and
                     not training_config.use_packed_cache):
                     cache_info = None  # Reset cache_info for FineWeb-Edu training
+
+                print(f"🔍 Debug: mode={self.training_mode.get('mode')}, use_packed_cache={training_config.use_packed_cache}, cache_info={'present' if cache_info else 'None'}")
+
+                # FIXED: Ensure trainer uses the same cache_info
+                if self.trainer:
+                    self.trainer.cache_info = cache_info
+                    print(f"🔄 Updated trainer cache_info: {'present' if cache_info else 'None'}")
 
                 calculator = get_dataset_calculator(cache_info)
                 dynamic_total_steps, _ = calculator.calculate_epoch_based_steps(training_config.target_epochs)

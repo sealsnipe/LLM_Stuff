@@ -564,27 +564,25 @@ class PackedSequenceDataset(Dataset):
         # Cache for loaded chunks
         self._chunk_cache = {}
         
-        from debug_logger import packed_cache_log
-        packed_cache_log(f"📦 Packed cache loaded: {self.cache_dir}")
-        packed_cache_log(f"Chunks: {len(self.chunk_files)}")
-        packed_cache_log(f"Sequences: {self.total_sequences:,}")
-
-        # Handle utilization stats (may not exist in incremental metadata)
+        # Simple logging without debug_logger dependency
+        print(f"📦 Packed cache loaded: {self.cache_dir}")
+        print(f"   Chunks: {len(self.chunk_files)}")
+        print(f"   Sequences: {self.total_sequences:,}")
         if 'utilization_stats' in self.metadata:
-            packed_cache_log(f"Utilization: {self.metadata['utilization_stats']['avg_utilization']:.1f}%")
+            print(f"   Utilization: {self.metadata['utilization_stats']['avg_utilization']:.1%}")
         else:
-            packed_cache_log(f"Utilization: Calculating... (incremental cache)")
+            print(f"   Utilization: Calculating... (incremental cache)")
 
-        packed_cache_log(f"Compression: {self.use_compression}")
+        print(f"   Compression: {self.use_compression}")
 
         # Show cache status
         status = self.metadata.get('status', 'unknown')
         if status == 'in_progress':
-            packed_cache_log(f"🔄 Status: Cache still growing (incremental)")
+            print(f"   🔄 Status: Cache still growing (incremental)")
         elif status == 'complete':
-            packed_cache_log(f"✅ Status: Cache complete")
+            print(f"   ✅ Status: Cache complete")
         else:
-            packed_cache_log(f"📊 Status: {status}")
+            print(f"   📊 Status: {status}")
     
     def _load_metadata(self) -> Dict:
         """Load and validate cache metadata"""
@@ -614,8 +612,7 @@ class PackedSequenceDataset(Dataset):
     
     def _build_chunk_index(self):
         """Build index for fast chunk lookup"""
-        from debug_logger import packed_cache_log
-        packed_cache_log("🔍 Building chunk index...")
+        print("🔍 Building chunk index...")
 
         self.chunk_index = []
         cumulative_sequences = 0
@@ -636,12 +633,11 @@ class PackedSequenceDataset(Dataset):
                 cumulative_sequences += num_sequences
 
             except Exception as e:
-                from debug_logger import error_log
-                error_log(f"Failed to index {os.path.basename(chunk_file)}: {e}", e)
+                print(f"⚠️ Failed to index {os.path.basename(chunk_file)}: {e}")
                 continue
 
         self.total_sequences = cumulative_sequences
-        packed_cache_log(f"✅ Index built: {len(self.chunk_index)} chunks, {self.total_sequences:,} sequences")
+        print(f"✅ Index built: {len(self.chunk_index)} chunks, {self.total_sequences:,} sequences")
     
     def _load_chunk(self, file_path: str, metadata_only: bool = False) -> Dict:
         """Load chunk with compression support"""
@@ -747,6 +743,5 @@ def create_packed_dataloader(cache_dir: str, batch_size: int = 32,
         drop_last=True  # For stable training
     )
     
-    from debug_logger import packed_cache_log
-    packed_cache_log(f"🚀 DataLoader ready: {len(dataset):,} sequences, {len(dataloader):,} batches")
+    print(f"🚀 DataLoader ready: {len(dataset):,} sequences, {len(dataloader):,} batches")
     return dataloader

@@ -28,6 +28,7 @@ sys.path.append(parent_dir)
 
 from sequence_packing_cache import PackedCacheCreator
 from cache_coordination import CacheCoordinator, create_coordination_info
+from unified_metadata_manager import UnifiedMetadataManager
 
 def analyze_parquet_files(input_dir: str) -> dict:
     """
@@ -248,15 +249,29 @@ def main():
     start_time = time.time()
     
     try:
+        # Initialize metadata manager
+        final_cache_dir = os.path.join(args.output_dir, "512", "FineWeb")
+        metadata_manager = UnifiedMetadataManager(final_cache_dir)
+
+        # Create forward process metadata
+        chunk_range = (coordination_info['forward_range'][0], coordination_info['forward_range'][1])
+        metadata_manager.create_process_metadata('forward', chunk_range, args.max_length, tokenizer.name_or_path)
+
         creator.create_cache(
             input_dir=args.input_dir,
             output_dir=args.output_dir,
             chunk_size=args.chunk_size,
             coordination_info=coordination_info
         )
-        
+
+        # Finalize forward process metadata
+        metadata_manager.finalize_process_metadata('forward')
+
+        # Create unified metadata
+        metadata_manager.create_unified_metadata()
+
         total_time = time.time() - start_time
-        
+
         print(f"\n🎉 SUCCESS!")
         print(f"   Total time: {total_time/3600:.1f} hours")
         print(f"   Cache location: {args.output_dir}")

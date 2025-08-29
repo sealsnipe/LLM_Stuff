@@ -41,7 +41,10 @@ class DatasetSizeCalculator:
             cache_dir = cache_path
 
         metadata_file = os.path.join(cache_dir, "cache_metadata.json")
-        
+
+        # Check if we need to create/update unified metadata
+        self._ensure_unified_metadata(cache_dir)
+
         if not os.path.exists(metadata_file):
             return None
         
@@ -52,6 +55,10 @@ class DatasetSizeCalculator:
             # FIXED: Calculate from actual chunk files if metadata is incomplete
             total_sequences = metadata.get('total_sequences', 0)
             cache_max_length = metadata.get('max_length', 512)
+
+            # Check if this is unified metadata
+            if metadata.get('unified_metadata', False):
+                print(f"📊 Using unified metadata: {total_sequences:,} sequences")
 
             if total_sequences == 0:
                 # Metadata incomplete - calculate from chunk files
@@ -100,6 +107,45 @@ class DatasetSizeCalculator:
             print(f"Info: Skipped {lz4_chunks} LZ4-compressed chunks (use metadata instead)")
 
         return total_sequences
+
+    def _ensure_unified_metadata(self, cache_dir: str):
+        """Ensure unified metadata exists and is up-to-date."""
+        try:
+            # Check if we have process-specific metadata files
+            forward_metadata = os.path.join(cache_dir, 'cache_metadata_forward.json')
+            reverse_metadata = os.path.join(cache_dir, 'cache_metadata_reverse.json')
+            main_metadata = os.path.join(cache_dir, 'cache_metadata.json')
+
+            # Check if unified metadata needs to be created/updated
+            needs_update = False
+
+            # If we have process-specific metadata but no unified metadata
+            if (os.path.exists(forward_metadata) or os.path.exists(reverse_metadata)):
+                if not os.path.exists(main_metadata):
+                    needs_update = True
+                else:
+                    # Check if main metadata is older than process metadata
+                    main_mtime = os.path.getmtime(main_metadata)
+                    if os.path.exists(forward_metadata) and os.path.getmtime(forward_metadata) > main_mtime:
+                        needs_update = True
+                    if os.path.exists(reverse_metadata) and os.path.getmtime(reverse_metadata) > main_mtime:
+                        needs_update = True
+
+            if needs_update:
+                print("🔄 Creating/updating unified metadata...")
+                # Import here to avoid circular imports
+                import sys
+                import os as os_module
+                scripts_path = os_module.path.join(os_module.path.dirname(__file__), '..', '..', 'scripts')
+                if scripts_path not in sys.path:
+                    sys.path.append(scripts_path)
+
+                from unified_metadata_manager import UnifiedMetadataManager
+                manager = UnifiedMetadataManager(cache_dir)
+                manager.create_unified_metadata()
+
+        except Exception as e:
+            print(f"⚠️ Warning: Could not ensure unified metadata: {e}")
 
     def get_fineweb_size(self) -> Optional[Tuple[int, int]]:
         """
@@ -276,6 +322,16 @@ class DatasetSizeCalculator:
             max_steps, total_training_tokens = self.calculate_epoch_based_steps(training_config.target_epochs)
             warmup_steps = self.calculate_dynamic_warmup_steps(max_steps)
             
+            # FIXED: Calculate actual steps per epoch based on dataset fraction
+            epoch_fraction = training_config.epoch_dataset_fraction
+            tokens_per_epoch = int(dataset_tokens * epoch_fraction)
+
+            # Calculate actual steps per epoch
+            effective_batch_size = training_config.batch_size * training_config.gradient_accumulation_steps
+            actual_sequence_length = self.cache_info.get('sequence_length', training_config.sequence_length) if self.cache_info else training_config.sequence_length
+            tokens_per_step = effective_batch_size * actual_sequence_length
+            steps_per_epoch = tokens_per_epoch // tokens_per_step
+
             return {
                 "mode": "epoch_based",
                 "target_epochs": training_config.target_epochs,
@@ -284,8 +340,8 @@ class DatasetSizeCalculator:
                 "total_training_tokens": total_training_tokens,
                 "max_steps": max_steps,
                 "warmup_steps": warmup_steps,
-                "tokens_per_epoch": dataset_tokens,
-                "steps_per_epoch": max_steps // training_config.target_epochs
+                "tokens_per_epoch": tokens_per_epoch,
+                "steps_per_epoch": steps_per_epoch
             }
         else:
             max_steps = training_config.max_steps
