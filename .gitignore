@@ -24,9 +24,21 @@ MANIFEST
 # PyTorch
 *.pth
 *.pt
-checkpoints/
-models/
 *.ckpt
+
+# Model files and training checkpoints (but not source code)
+# Ignore actual model files in any directory
+**/*.pth
+**/*.pt
+**/*.ckpt
+**/*.safetensors
+**/*.bin
+**/*.model
+
+# Ignore checkpoint directories at root level (for training outputs)
+/checkpoints/
+# Ignore models directory at root level (for saved models)
+/models/
 
 # Jupyter Notebook
 .ipynb_checkpoints
