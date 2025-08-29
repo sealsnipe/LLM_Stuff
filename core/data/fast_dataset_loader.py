@@ -90,15 +90,18 @@ def load_samples_fast(num_samples: int, verbose: bool = True):
         files_to_load = cached_files[:6]  # 6 Dateien für large
         if verbose:
             print(f" Large dataset: Using 6 files")
-    else:
-        files_to_load = cached_files  # Alle Dateien für production
+    elif num_samples <= 5000000:
+        files_to_load = cached_files[:10]  # 10 Dateien für sehr large
         if verbose:
-            print(f" Production dataset: Using all {len(cached_files)} files")
+            print(f" Very large dataset: Using 10 files")
+    else:
+        files_to_load = cached_files  # Alle Dateien für full/production
+        if verbose:
+            print(f" Full dataset: Using all {len(cached_files)} files ({num_samples:,} samples)")
 
     if verbose:
         print(f"Loading {len(files_to_load)} files...")
-    else:
-        print(f"Loading {len(files_to_load)} files for {num_samples:,} samples...")
+    # Silent loading für Training - wird in Pipeline angezeigt
     
     # Lade Dateien mit Progress Bar
     datasets = []
@@ -168,8 +171,8 @@ def load_samples_fast(num_samples: int, verbose: bool = True):
             text_preview = text[:80] + "..." if len(text) > 80 else text
             print(f" Sample: {text_preview} (score: {sample.get('score', 'N/A')})")
     else:
-        # Kompakte Ausgabe für Training
-        print(f"Loaded {len(combined_dataset):,} samples in {elapsed:.1f}s ({samples_per_sec:,.0f} samples/sec)")
+        # Silent loading - wird in Pipeline angezeigt
+        pass
 
     return combined_dataset
 

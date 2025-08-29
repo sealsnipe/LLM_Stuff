@@ -26,12 +26,29 @@ def print_professional_header():
     dataset_info = dataset_config.dataset_sizes.get(dataset_config.default_dataset_size, {})
     num_samples = dataset_info.get('num_samples', 0)
     
-    # Model Parameter Count
-    total_params = (model_config.vocab_size * model_config.hidden_size + 
-                   model_config.num_layers * (
-                       4 * model_config.hidden_size * model_config.hidden_size +  # MLP
-                       3 * model_config.hidden_size * model_config.hidden_size    # Attention
-                   ))
+    # Model Parameter Count - KORREKTE SwiGLU + GQA Berechnung
+    # Token Embeddings (tied)
+    token_embeddings = model_config.vocab_size * model_config.hidden_size
+
+    # Per Layer: Attention (GQA) + SwiGLU FFN + LayerNorms
+    head_dim = model_config.hidden_size // model_config.num_attention_heads
+    attention_per_layer = (
+        model_config.hidden_size * (model_config.num_attention_heads * head_dim) +  # q_proj
+        model_config.hidden_size * (model_config.num_key_value_heads * head_dim) +  # k_proj
+        model_config.hidden_size * (model_config.num_key_value_heads * head_dim) +  # v_proj
+        (model_config.num_attention_heads * head_dim) * model_config.hidden_size    # o_proj
+    )
+
+    # SwiGLU FFN (3 matrices)
+    ffn_per_layer = 3 * model_config.hidden_size * model_config.intermediate_size
+
+    # LayerNorms (2 per layer + 1 final)
+    layernorm_per_layer = 2 * model_config.hidden_size
+    final_norm = model_config.hidden_size
+
+    total_params = (token_embeddings +
+                   model_config.num_layers * (attention_per_layer + ffn_per_layer + layernorm_per_layer) +
+                   final_norm)
     
     print(f"  Hardware: {gpu_name} ({gpu_memory:.1f}GB) | CUDA {cuda_version} | Compute {compute_capability}")
     print()
@@ -74,14 +91,15 @@ class InitializationPipeline:
     def print_header(self):
         """Zeigt Pipeline Header."""
         print()  # Leerzeile vor Pipeline
-        print("🔧 INITIALIZATION PIPELINE")
+        print("INITIALIZATION PIPELINE")  # KEIN EMOJI - kann Probleme verursachen
         for i, step in enumerate(self.steps):
             print(f"├─ {step:20s} {self.status[i]}")
         print()
         self.printed = True
+        # Merke: Total 6 Zeilen (Leerzeile + Header + 4 Steps + Leerzeile)
 
     def update_step(self, step_index: int, success: bool = True, details: str = ""):
-        """Aktualisiert einen Schritt in-place."""
+        """Aktualisiert einen Schritt mit korrekten ANSI-Codes."""
         if not self.printed:
             return
 
@@ -90,35 +108,32 @@ class InitializationPipeline:
         else:
             self.status[step_index] = f" Failed {details}"
 
-        # Windows-kompatible In-Place Updates mit colorama
+        # KORREKTE INLINE-UPDATE LÖSUNG
         import sys
         import os
 
         # Aktiviere ANSI-Support für Windows
-        if os.name == 'nt':  # Windows
+        if os.name == 'nt':
             try:
                 import colorama
                 colorama.init()
             except ImportError:
-                # Fallback: Einfach neu drucken ohne In-Place
-                print("\r" + " " * 80)  # Clear line
-                for i, step in enumerate(self.steps):
-                    print(f"├─ {step:20s} {self.status[i]:<40}")
-                print()
-                return
+                pass
 
-        # ANSI Escape Codes für Cursor-Bewegung
-        lines_to_go_up = len(self.steps) + 1  # +1 für Leerzeile
+        # KORREKTE Zeilen-Berechnung:
+        # Struktur: [Leerzeile] + [Header] + [4 Steps] + [Leerzeile] = 6 Zeilen total
+        total_lines = 6
 
-        # Gehe zurück und lösche Zeilen
-        for _ in range(lines_to_go_up):
+        # Gehe alle Zeilen hoch
+        for _ in range(total_lines):
             sys.stdout.write("\033[A")  # Eine Zeile hoch
-            sys.stdout.write("\033[2K")  # Ganze Zeile löschen
 
-        # Schreibe alle Pipeline-Zeilen neu
+        # Drucke alles neu (ohne die erste Leerzeile)
+        print("INITIALIZATION PIPELINE")
         for i, step in enumerate(self.steps):
-            print(f"├─ {step:20s} {self.status[i]:<40}")
-        # Keine Leerzeile hier - wird in complete_all() hinzugefügt
+            print(f"├─ {step:20s} {self.status[i]}")
+        print()  # Leerzeile am Ende
+
         sys.stdout.flush()
 
     def complete_all(self):
@@ -134,7 +149,56 @@ def print_initialization_pipeline():
     pipeline.print_header()
     return pipeline
 
-def print_optimization_status():
+def _get_sequence_packing_status(dataloader_info):
+    """Ermittelt den tatsächlichen Sequence Packing Status."""
+    from config import training_config
+
+    # Prüfe ob Sequence Packing konfiguriert ist
+    if not training_config.use_sequence_packing:
+        return {
+            'active': False,
+            'reason': 'Available but disabled (efficiency)',
+            'method': None
+        }
+
+    # Prüfe ob DataLoader-Info verfügbar ist
+    if not dataloader_info:
+        return {
+            'active': False,
+            'reason': 'Status unknown (no dataloader info)',
+            'method': None
+        }
+
+    # Prüfe den tatsächlichen DataLoader-Typ
+    dataloader_type = dataloader_info.get('type', 'unknown')
+
+    if dataloader_type == 'packed_cache':
+        return {
+            'active': True,
+            'reason': 'Active via Packed Cache',
+            'method': 'Packed Cache'
+        }
+    elif dataloader_type == 'sequence_packed':
+        return {
+            'active': True,
+            'reason': 'Active via Live Packing',
+            'method': 'Live Packing'
+        }
+    elif dataloader_type == 'fallback':
+        error_reason = dataloader_info.get('error', 'unknown error')
+        return {
+            'active': False,
+            'reason': f'Failed ({error_reason})',
+            'method': None
+        }
+    else:
+        return {
+            'active': False,
+            'reason': 'Available but not used (fallback active)',
+            'method': None
+        }
+
+def print_optimization_status(dataloader_info=None):
     """Zeigt detaillierte Optimization-Status."""
     print("⚡ OPTIMIZATIONS")
     
@@ -164,6 +228,33 @@ def print_optimization_status():
     print(f"├─ Gradient Accumulation..... ✓ {training_config.gradient_accumulation_steps} steps (memory)")
     print(f"├─ Non-blocking Transfer..... ✓ GPU transfer (speed)")
     print(f"├─ DataLoader Optimization... ✓ Pin memory + {training_config.dataloader_num_workers} workers + prefetch {training_config.dataloader_prefetch_factor} (speed)")
+
+    # Neue Optimierungen - Dynamischer Sequence Packing Status
+    sequence_packing_status = _get_sequence_packing_status(dataloader_info)
+    if sequence_packing_status['active']:
+        print(f"├─ Sequence Packing.......... ✓ {sequence_packing_status['method']} (efficiency)")
+    if training_config.use_tf32:
+        print(f"├─ TF32 Acceleration......... ✓ Enabled (speed)")
+    print(f"├─ Weight Decay Groups....... ✓ Enabled (stability)")
+    if training_config.use_length_bucketing:
+        print(f"├─ Length Bucketing.......... ✓ Enabled (efficiency)")
+    if training_config.use_cuda_graphs:
+        print(f"├─ CUDA Graphs............... ✓ Enabled (speed)")
+    if training_config.use_8bit_adam:
+        try:
+            import bitsandbytes
+            print(f"├─ 8-bit Adam States......... ✓ Enabled (memory)")
+        except ImportError:
+            print(f"├─ 8-bit Adam States......... ⚠ Fallback to FP32 (bitsandbytes n/a)")
+    if training_config.selective_checkpointing != "full":
+        print(f"├─ Selective Checkpointing... ✓ {training_config.selective_checkpointing} (memory)")
+    if training_config.use_fused_cross_entropy:
+        print(f"├─ Fused Cross-Entropy....... ✓ Enabled (speed)")
+    if training_config.use_ema:
+        print(f"├─ EMA Weights............... ✓ Decay {training_config.ema_decay} (stability)")
+    if training_config.production_monitoring:
+        print(f"├─ Production Monitoring..... ✓ Advanced metrics (quality)")
+
     print(f"└─ Memory Reset.............. ✓ Peak stats reset (monitoring)")
     print()
     
@@ -183,14 +274,35 @@ def print_optimization_status():
     if not training_config.use_activation_checkpointing:
         print("├─ Activation Checkpointing..  Available but disabled (memory)")
 
-    print("├─ Sequence Packing..........  Not implemented (efficiency)")
+    # Nur noch nicht implementierte Features anzeigen
+    if not sequence_packing_status['active']:
+        print(f"├─ Sequence Packing..........  {sequence_packing_status['reason']}")
+    if not training_config.use_cuda_graphs:
+        print("├─ CUDA Graphs...............  Available but disabled (speed)")
+    if not training_config.use_length_bucketing:
+        print("├─ Length Bucketing..........  Available but disabled (efficiency)")
+    if not training_config.use_tf32:
+        print("├─ TF32 Acceleration.........  Available but disabled (speed)")
 
     # Advanced Techniques
     print("├─ Quantization (8-bit)......  Not implemented (memory)")
     print("└─ DeepSpeed ZeRO............  Not implemented (multi-gpu)")
 
-def print_training_start():
+def print_training_start(override_steps=None):
     """Zeigt Training Start Banner."""
+    from config import training_config
+
+    # Use override steps if provided, otherwise check for dynamic steps
+    if override_steps is not None:
+        effective_steps = override_steps
+    else:
+        # Check for dynamic steps override
+        try:
+            from training_windows import _dynamic_max_steps
+            effective_steps = _dynamic_max_steps if _dynamic_max_steps is not None else training_config.max_steps
+        except ImportError:
+            effective_steps = training_config.max_steps
+
     if torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(0)
         gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
@@ -198,12 +310,12 @@ def print_training_start():
     else:
         gpu_info = "  GPU: Not available"
 
-    print("=" * 80)
+    print("=" * 75)
     print(f" TRAINING STARTED | {gpu_info}")
-    print(f" Total Steps: {training_config.max_steps:,}")
+    print(f" Total Steps: {effective_steps:,}")
     print()
-    print("🚀 TRAINING PROGRESS")
-    print("=" * 80)
+    print("📈 TRAINING PROGRESS")
+    print("=" * 75)
 
 def print_complete_professional_setup():
     """Zeigt kompletten professionellen Setup-Log."""

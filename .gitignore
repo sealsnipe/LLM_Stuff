@@ -92,6 +92,7 @@ anaconda.exe
 logs/
 wandb/
 tensorboard/
+training_logs/
 
 # Cache
 .cache/
@@ -114,8 +115,14 @@ cache/
 # Trainierte Modelle (zu groß für Git)
 trained_models/
 
+# Aktuelles Training (lokal)
+current_training/
+
 # Berichte und Analysen (lokal, nicht ins Repository)
 reports/
+
+# Dokumentation (lokal, nicht ins Repository)
+docs/
 
 # Compiler Artifacts
 *.exp

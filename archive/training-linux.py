@@ -216,7 +216,10 @@ def linux_optimized_training_loop(use_real_data: bool = True, dataset_size: str 
     config_info = dataset_config.dataset_sizes.get(dataset_size, {"num_samples": 100000})
     num_samples = config_info["num_samples"]
 
-    dataloader = create_optimized_dataset(
+    # Import intelligent dataloader from Windows training
+    from training_windows import create_intelligent_dataloader
+
+    dataloader = create_intelligent_dataloader(
         num_samples=num_samples,  # Aus Config: medium=300k, large=1M, etc.
         use_real_data=use_real_data,
         dataset_size=dataset_size

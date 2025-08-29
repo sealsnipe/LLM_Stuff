@@ -66,10 +66,10 @@ class CleanProgressDisplay:
         return self._format_time(eta_seconds)
     
     def _create_progress_bar(self, current_step: int, width: int = 30) -> str:
-        """Erstellt ASCII Progress Bar."""
+        """Erstellt ASCII Progress Bar - KEINE UNICODE ZEICHEN."""
         progress = current_step / self.total_steps
         filled = int(width * progress)
-        bar = "█" * filled + "░" * (width - filled)
+        bar = "=" * filled + "-" * (width - filled)
         return f"[{bar}]"
     
     def update(self, step: int, loss: float, learning_rate: float = None,
@@ -103,18 +103,18 @@ class CleanProgressDisplay:
         # Steps per second
         steps_per_sec = step / elapsed if elapsed > 0 else 0
 
-        # Progress Bar (breite Zeile)
-        progress_bar = self._create_progress_bar(step, width=60)
-        progress_line = f"🚀 {progress_bar} {progress_pct:6.2f}% ({step:,}/{self.total_steps:,})"
+        # KURZE Progress Bar - KEINE EMOJIS
+        progress_bar = self._create_progress_bar(step, width=30)  # Kürzer!
 
         # Speed in s/step statt steps/s
         sec_per_step = 1.0 / steps_per_sec if steps_per_sec > 0 else 0
 
-        # Info-Zeile (kompakt, ohne Batch)
-        info_line = f"📊 Loss: {loss:7.4f} │ Speed: {sec_per_step:5.1f} s/step │ ETA: {eta:>8} │ GPU: {gpu_alloc:4.1f}GB ({gpu_usage_pct:4.1f}%)"
+        # KOMPAKTE eine Zeile - ALLES ZUSAMMEN
+        combined_line = f"TRAIN {progress_bar} {progress_pct:5.1f}% | Loss: {loss:6.3f} | {sec_per_step:4.1f}s/step | ETA: {eta:>6} | GPU: {gpu_alloc:3.1f}GB"
 
+        # Learning Rate und Extra Info in combined_line integrieren
         if learning_rate:
-            info_line += f" │ LR: {learning_rate:.2e}"
+            combined_line += f" | LR: {learning_rate:.2e}"
 
         if extra_info:
             for key, value in extra_info.items():
@@ -122,29 +122,17 @@ class CleanProgressDisplay:
                 if key.lower() == 'batch':
                     continue
                 if isinstance(value, float):
-                    info_line += f" │ {key}: {value:.3f}"
+                    combined_line += f" | {key}: {value:.3f}"
                 else:
-                    info_line += f" │ {key}: {value}"
+                    combined_line += f" | {key}: {value}"
 
-        # EINFACHE LÖSUNG: Carriage Return für 2 Zeilen
+        # ECHTE INLINE LÖSUNG: Carriage Return ohne Newline
         if step == 1:
-            # Erste Ausgabe: Schreibe beide Zeilen
-            print(f"{progress_line}")
-            print(f"{info_line}", end="")
+            # Erste Ausgabe - OHNE newline
+            sys.stdout.write(f"{combined_line}")
         else:
-            # Windows-kompatible Updates
-            import os
-            if os.name == 'nt':  # Windows
-                # Gehe 2 Zeilen hoch und lösche sie
-                sys.stdout.write("\033[A\033[K")  # Zeile 1 hoch + löschen
-                sys.stdout.write("\033[A\033[K")  # Zeile 2 hoch + löschen
-            else:
-                # Linux/Mac
-                print(f"\033[2A", end="")
-
-            # Schreibe beide Zeilen neu
-            print(f"{progress_line}")
-            print(f"{info_line}", end="")
+            # Update: Carriage Return + überschreibe
+            sys.stdout.write(f"\r{combined_line}")
 
         sys.stdout.flush()
 
